@@ -1,0 +1,46 @@
+package database
+
+import (
+	"database/sql"
+	"errors"
+	"fmt"
+	"time"
+
+	_ "github.com/lib/pq"
+)
+
+func Open(databaseURL string) (*sql.DB, error) {
+	if databaseURL == "" {
+		return nil, errors.New("DATABASE_URL is not set; copy .env.example to .env and configure PostgreSQL")
+	}
+	db, err := sql.Open("postgres", databaseURL)
+	if err != nil { return nil, fmt.Errorf("open PostgreSQL: %w", err) }
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(30 * time.Minute)
+	if err := db.Ping(); err != nil { db.Close(); return nil, fmt.Errorf("connect to PostgreSQL: %w", err) }
+	return db, nil
+}
+
+func Migrate(db *sql.DB) error {
+	const schema = `
+CREATE TABLE IF NOT EXISTS users (
+    id BIGSERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    email TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS sessions (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_hash TEXT NOT NULL UNIQUE,
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS sessions_user_id_idx ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS sessions_expires_at_idx ON sessions(expires_at);
+`
+	_, err := db.Exec(schema)
+	return err
+}
