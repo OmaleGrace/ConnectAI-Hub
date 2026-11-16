@@ -1,1 +1,50 @@
-{{template "head" .}}{{template "nav" .}}<main class="module-page wrap"><a class="back-link" href="/dashboard">← Back to workspace</a><section class="module-hero"><span class="tool-icon {{.Module.Color}} module-icon">{{.Module.Icon}}</span><div class="eyebrow">CONNECTAI HUB WORKSPACE</div><h1>{{.Module.Name}}</h1><p>{{.Module.Description}}</p><div class="module-status"><span class="status-dot"></span> Workspace preview · AI connection coming soon</div></section><section class="module-content"><div class="module-panel"><div class="panel-heading"><div><span class="eyebrow">GET STARTED</span><h2>What would you like to work on?</h2></div><span class="panel-spark">✧</span></div><div class="feature-list">{{range .Module.Features}}<div class="feature-row"><span>✓</span>{{.}}</div>{{end}}</div><div class="prompt-preview"><label for="promptBox">YOUR IDEA OR QUESTION</label><textarea id="promptBox" rows="4" placeholder="Describe what you want help with..."></textarea><div class="prompt-bottom"><span>AI responses will be enabled in the next integration stage.</span><button class="button" type="button" disabled>Coming soon ↗</button></div></div></div><aside class="module-aside"><span class="aside-icon">✦</span><h3>A focused space for your ideas.</h3><p>Each tool will have its own guided workflow, while keeping your experience connected in one account.</p><a href="/dashboard" class="card-link">Explore other tools →</a></aside></section></main>{{template "footer" .}}
+{{template "head" .}}{{template "nav" .}}
+<main class="module-page wrap">
+  <a class="back-link" href="/dashboard">← Back to workspace</a>
+  <section class="module-hero">
+    <span class="tool-icon {{.Module.Color}} module-icon">{{.Module.Icon}}</span>
+    <div class="eyebrow">CONNECTAI HUB WORKSPACE</div>
+    <h1>{{.Module.Name}}</h1>
+    <p>{{.Module.Description}}</p>
+    <div class="module-status"><span class="status-dot"></span> Gemini AI · Conversation saved to your account</div>
+  </section>
+  <section class="module-content">
+    <div class="module-panel chat-panel">
+      <div class="panel-heading"><div><span class="eyebrow">YOUR AI ASSISTANT</span><h2>What would you like to work on?</h2></div><span class="panel-spark">✧</span></div>
+      <div class="feature-list">{{range .Module.Features}}<div class="feature-row"><span>✓</span>{{.}}</div>{{end}}</div>
+      <div class="quick-prompts" aria-label="Suggested starting prompts">
+        <span class="quick-prompts-label">TRY ONE OF THESE</span>
+        <div class="quick-prompt-list">{{range .QuickPrompts}}<button type="button" class="quick-prompt" data-prompt="{{.}}">{{.}}</button>{{end}}</div>
+      </div>
+      <div class="chat-tools">
+        <span>Your conversation is private to your account.</span>
+        <div><button type="button" class="text-tool" id="exportChat">Export chat</button><button type="button" class="text-tool danger-tool" id="clearChat">Clear chat</button></div>
+      </div>
+      {{if or (eq .Module.Slug "documents") (eq .Module.Slug "data")}}
+      <form class="document-upload" id="documentUpload" data-module="{{.Module.Slug}}" data-csrf="{{.CSRF}}">
+        <div>
+          <strong>Analyse a file</strong>
+          <p>Upload a document or dataset (maximum 5 MB).</p>
+        </div>
+        <label for="documentFile">Choose file</label>
+        <input id="documentFile" name="document" type="file" accept=".txt,.md,.csv,.json,.log,.pdf,.docx,.xlsx,text/plain,text/csv,application/json,application/pdf" required>
+        <label class="sr-only" for="documentQuestion">What should the AI look for?</label>
+        <input id="documentQuestion" name="question" type="text" maxlength="4000" placeholder="e.g. Summarise the key points and findings">
+        <button class="button" id="analyzeButton" type="submit">Analyse file ↗</button>
+        <small>Supported: TXT, MD, CSV, JSON, LOG, PDF, DOCX and XLSX.</small>
+      </form>
+      {{end}}
+      <div class="chat-messages" id="chatMessages" aria-live="polite">
+        <div class="chat-empty" id="chatEmpty"><span>✦</span><b>Your conversation starts here.</b><p>Ask a question or describe what you'd like help with.</p></div>
+      </div>
+      <form class="chat-form" id="chatForm" data-module="{{.Module.Slug}}" data-csrf="{{.CSRF}}">
+        <label class="sr-only" for="chatInput">Your message</label>
+        <textarea id="chatInput" rows="3" maxlength="8000" placeholder="Message your {{.Module.Name}} assistant..." required></textarea>
+        <div class="chat-form-bottom"><span>Don't share passwords, API keys or private information.</span><button class="button" id="sendButton" type="submit">Send message ↗</button></div>
+      </form>
+      <p class="chat-error" id="chatError" role="alert" hidden></p>
+    </div>
+    <aside class="module-aside"><span class="aside-icon">✦</span><h3>A focused space for your ideas.</h3><p>This assistant is configured for {{.Module.Name}} tasks. Your recent conversation is saved to your account.</p><a href="/dashboard" class="card-link">Explore other tools →</a></aside>
+  </section>
+</main>
+{{template "footer" .}}
