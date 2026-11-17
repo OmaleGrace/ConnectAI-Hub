@@ -13,11 +13,14 @@ import (
 	"html/template"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/smtp"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -32,14 +35,37 @@ type Module struct {
 type User struct {
 	ID          int64
 	Name, Email string
+	IsAdmin     bool
 }
 type PageData struct {
 	Title, Active, CSRF, Error, Success, Name string
 	UsageTotal, UsageMonth                    int64
+	AdminUsers, AdminRequests, DailyLimit     int64
+	AdminUserList                             []AdminUserInfo
+	ModuleUsage                               []ModuleUsage
+	Sessions                                  []SessionInfo
 	Modules                                   []Module
 	Module                                    Module
 	QuickPrompts                              []string
 	User                                      *User
+}
+type ModuleUsage struct {
+	Name  string
+	Count int64
+}
+type AdminUserInfo struct {
+	ID                                        int64
+	Name, Email, Phone, Purpose, Organization string
+	CreatedAt                                 time.Time
+	Requests                                  int64
+}
+type SessionInfo struct {
+	CreatedAt, ExpiresAt time.Time
+	Current              bool
+}
+type rateEntry struct {
+	Count int
+	Reset time.Time
 }
 type Server struct {
 	mux     *http.ServeMux
@@ -47,6 +73,8 @@ type Server struct {
 	db      *sql.DB
 	modules []Module
 	gemini  *ai.Client
+	rateMu  sync.Mutex
+	rates   map[string]rateEntry
 }
 
 func New(db *sql.DB) (*Server, error) {
@@ -54,7 +82,7 @@ func New(db *sql.DB) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{mux: http.NewServeMux(), tpl: t, db: db, gemini: ai.NewClient(os.Getenv("GEMINI_API_KEY"), os.Getenv("GEMINI_MODEL")), modules: []Module{
+	s := &Server{mux: http.NewServeMux(), tpl: t, db: db, rates: make(map[string]rateEntry), gemini: ai.NewClient(os.Getenv("GEMINI_API_KEY"), os.Getenv("GEMINI_MODEL")), modules: []Module{
 		{"study", "Study AI", "Understand difficult topics, practise concepts and build confidence as you learn.", "✦", "violet", []string{"Explain topics simply", "Create practice questions", "Summarise learning materials"}},
 		{"career", "Career AI", "Prepare professional career materials and practise for your next opportunity.", "↗", "blue", []string{"Improve CV content", "Practise interview questions", "Explore career paths"}},
 		{"business", "Business AI", "Turn business ideas into clearer plans, marketing content and practical next steps.", "◈", "orange", []string{"Develop business ideas", "Create marketing plans", "Draft product descriptions"}},
@@ -63,10 +91,34 @@ func New(db *sql.DB) (*Server, error) {
 		{"support", "Support AI", "Design helpful customer-support workflows and responses.", "◎", "cyan", []string{"Draft support replies", "Organise FAQs", "Design support workflows"}},
 		{"data", "Data AI", "Make data easier to understand with analysis plans, summaries and visual insights.", "▥", "purple", []string{"Explore datasets", "Summarise findings", "Plan charts and reports"}},
 	}}
+	// ADMIN_EMAIL is an explicit bootstrap allow-list. It promotes only that
+	// exact existing account; remove the variable after promotion if desired.
+	if adminEmail := strings.ToLower(strings.TrimSpace(os.Getenv("ADMIN_EMAIL"))); adminEmail != "" {
+		if _, err := db.Exec(`UPDATE users SET is_admin=TRUE WHERE lower(email)=$1`, adminEmail); err != nil {
+			return nil, err
+		}
+	}
 	s.routes()
 	return s, nil
 }
-func (s *Server) Handler() http.Handler { return s.mux }
+func (s *Server) Handler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				log.Printf("connectai: recovered from handler panic: %v", recovered)
+				http.Error(w, "An unexpected server error occurred. Please try again.", http.StatusInternalServerError)
+			}
+		}()
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		if os.Getenv("APP_ENV") == "production" {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
+		s.mux.ServeHTTP(w, r)
+	})
+}
 func (s *Server) routes() {
 	s.mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("./static"))))
 	s.mux.HandleFunc("GET /service-worker.js", func(w http.ResponseWriter, r *http.Request) {
@@ -75,12 +127,22 @@ func (s *Server) routes() {
 		http.ServeFile(w, r, "./static/service-worker.js")
 	})
 	s.mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if err := s.db.PingContext(ctx); err != nil {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte("ok"))
 	})
 	s.mux.HandleFunc("GET /{$}", s.home)
 	s.mux.HandleFunc("GET /dashboard", s.dashboard)
 	s.mux.HandleFunc("GET /settings", s.settingsPage)
+	s.mux.HandleFunc("GET /settings/sessions", s.sessionsPage)
+	s.mux.HandleFunc("POST /settings/sessions/revoke", s.revokeSessions)
+	s.mux.HandleFunc("GET /admin", s.adminDashboard)
+	s.mux.HandleFunc("POST /admin/users/{id}/delete", s.adminDeleteUser)
 	s.mux.HandleFunc("POST /settings/profile", s.updateProfile)
 	s.mux.HandleFunc("POST /settings/password", s.updatePassword)
 	s.mux.HandleFunc("POST /settings/password-reset", s.requestPasswordReset)
@@ -132,7 +194,7 @@ func (s *Server) currentUser(r *http.Request) *User {
 	sum := sha256.Sum256([]byte(c.Value))
 	hash := hex.EncodeToString(sum[:])
 	var u User
-	err = s.db.QueryRow(`SELECT u.id,u.name,u.email FROM users u JOIN sessions s ON s.user_id=u.id WHERE s.token_hash=$1 AND s.expires_at>NOW()`, hash).Scan(&u.ID, &u.Name, &u.Email)
+	err = s.db.QueryRow(`SELECT u.id,u.name,u.email,u.is_admin FROM users u JOIN sessions s ON s.user_id=u.id WHERE s.token_hash=$1 AND s.expires_at>NOW()`, hash).Scan(&u.ID, &u.Name, &u.Email, &u.IsAdmin)
 	if err != nil {
 		return nil
 	}
@@ -183,6 +245,13 @@ func (s *Server) module(w http.ResponseWriter, r *http.Request) {
 func (s *Server) registerPage(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "register.html", PageData{Title: "Create account", CSRF: s.csrf(w, r)})
 }
+func nullIfEmpty(value string) any {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return value
+}
+
 func (s *Server) loginPage(w http.ResponseWriter, r *http.Request) {
 	success := ""
 	if r.URL.Query().Get("reset") == "1" {
@@ -191,6 +260,10 @@ func (s *Server) loginPage(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "login.html", PageData{Title: "Log in", CSRF: s.csrf(w, r), Success: success})
 }
 func (s *Server) register(w http.ResponseWriter, r *http.Request) {
+	if !s.allowRate("register:"+clientIP(r), 5, 10*time.Minute) {
+		http.Error(w, "Too many registration attempts. Try again later.", http.StatusTooManyRequests)
+		return
+	}
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "Invalid form", 400)
 		return
@@ -201,9 +274,13 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	}
 	name := strings.TrimSpace(r.FormValue("name"))
 	email := strings.ToLower(strings.TrimSpace(r.FormValue("email")))
+	phone := strings.TrimSpace(r.FormValue("phone"))
+	purpose := strings.TrimSpace(r.FormValue("purpose"))
+	organization := strings.TrimSpace(r.FormValue("organization"))
 	password := r.FormValue("password")
-	if len([]rune(name)) < 3 || len([]rune(name)) > 80 || !validEmail(email) {
-		s.render(w, "register.html", PageData{Title: "Create account", CSRF: s.csrf(w, r), Error: "Enter a valid name and email address."})
+	allowedPurposes := map[string]bool{"personal": true, "student": true, "developer": true, "business": true, "professional": true, "other": true}
+	if len([]rune(name)) < 3 || len([]rune(name)) > 80 || !validEmail(email) || len(phone) > 32 || len([]rune(organization)) > 100 || !allowedPurposes[purpose] || r.FormValue("terms") != "accepted" {
+		s.render(w, "register.html", PageData{Title: "Create account", CSRF: s.csrf(w, r), Error: "Please complete the required fields with valid information and accept the terms."})
 		return
 	}
 	hash, err := auth.HashPassword(password)
@@ -212,7 +289,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var id int64
-	err = s.db.QueryRow(`INSERT INTO users(name,email,password_hash) VALUES($1,$2,$3) RETURNING id`, name, email, hash).Scan(&id)
+	err = s.db.QueryRow(`INSERT INTO users(name,email,password_hash,phone,purpose,organization,terms_accepted_at) VALUES($1,$2,$3,$4,$5,$6,NOW()) RETURNING id`, name, email, hash, nullIfEmpty(phone), purpose, nullIfEmpty(organization)).Scan(&id)
 	if err != nil {
 		s.render(w, "register.html", PageData{Title: "Create account", CSRF: s.csrf(w, r), Error: "That email may already be registered. Check it or log in."})
 		return
@@ -229,6 +306,10 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 }
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
+	if !s.allowRate("login:"+clientIP(r), 10, 10*time.Minute) {
+		http.Error(w, "Too many sign-in attempts. Try again later.", http.StatusTooManyRequests)
+		return
+	}
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "Invalid form", 400)
 		return
@@ -386,6 +467,191 @@ type storedMessage struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+func clientIP(r *http.Request) string {
+	// Do not trust arbitrary X-Forwarded-For values; Render terminates requests
+	// at its proxy, while RemoteAddr remains a safe coarse-grained fallback.
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
+
+// allowRate is a small per-process limiter. For multi-instance deployments,
+// put equivalent limits at the reverse proxy/WAF as well.
+func (s *Server) allowRate(key string, max int, window time.Duration) bool {
+	now := time.Now()
+	s.rateMu.Lock()
+	defer s.rateMu.Unlock()
+	e := s.rates[key]
+	if now.After(e.Reset) {
+		e = rateEntry{Reset: now.Add(window)}
+	}
+	if e.Count >= max {
+		s.rates[key] = e
+		return false
+	}
+	e.Count++
+	s.rates[key] = e
+	if len(s.rates) > 10000 {
+		for k, v := range s.rates {
+			if now.After(v.Reset) {
+				delete(s.rates, k)
+			}
+		}
+	}
+	return true
+}
+func (s *Server) withinDailyLimit(w http.ResponseWriter, userID int64) bool {
+	limit := int64(100)
+	if raw := strings.TrimSpace(os.Getenv("DAILY_AI_REQUEST_LIMIT")); raw != "" {
+		if n, err := strconv.ParseInt(raw, 10, 64); err == nil && n > 0 && n <= 10000 {
+			limit = n
+		}
+	}
+	var used int64
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM ai_usage WHERE user_id=$1 AND created_at >= date_trunc('day', NOW())`, userID).Scan(&used); err != nil {
+		http.Error(w, "Unable to check your daily usage. Please try again.", 500)
+		return false
+	}
+	if used >= limit {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(chatResponse{Error: fmt.Sprintf("You've reached today's AI request limit (%d). Please try again tomorrow.", limit)})
+		return false
+	}
+	return true
+}
+func (s *Server) adminDashboard(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	if !u.IsAdmin {
+		http.NotFound(w, r)
+		return
+	}
+	var users, requests, today int64
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&users)
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM ai_usage`).Scan(&requests)
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM ai_usage WHERE created_at >= date_trunc('day',NOW())`).Scan(&today)
+	usage := []ModuleUsage{}
+	rows, err := s.db.Query(`SELECT module_slug,COUNT(*) FROM ai_usage GROUP BY module_slug ORDER BY COUNT(*) DESC`)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var item ModuleUsage
+			if rows.Scan(&item.Name, &item.Count) == nil {
+				usage = append(usage, item)
+			}
+		}
+	}
+	userList := make([]AdminUserInfo, 0)
+	userRows, userErr := s.db.Query(`SELECT u.id,u.name,u.email,COALESCE(u.phone,''),COALESCE(u.purpose,''),COALESCE(u.organization,''),u.created_at,COUNT(a.id) FROM users u LEFT JOIN ai_usage a ON a.user_id=u.id GROUP BY u.id ORDER BY u.created_at DESC`)
+	if userErr == nil {
+		defer userRows.Close()
+		for userRows.Next() {
+			var item AdminUserInfo
+			if userRows.Scan(&item.ID, &item.Name, &item.Email, &item.Phone, &item.Purpose, &item.Organization, &item.CreatedAt, &item.Requests) == nil {
+				userList = append(userList, item)
+			}
+		}
+	}
+	s.render(w, "admin.html", PageData{Title: "Admin dashboard", Active: "admin", User: u, CSRF: s.csrf(w, r), AdminUsers: users, AdminRequests: requests, UsageMonth: today, ModuleUsage: usage, AdminUserList: userList, Name: map[string]string{"1": "deleted"}[r.URL.Query().Get("deleted")]})
+}
+
+func (s *Server) adminDeleteUser(w http.ResponseWriter, r *http.Request) {
+	admin := s.currentUser(r)
+	if admin == nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	if !admin.IsAdmin {
+		http.NotFound(w, r)
+		return
+	}
+	if !s.validCSRF(r) {
+		http.Error(w, "Your form expired. Refresh and try again.", http.StatusBadRequest)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+	targetID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || targetID <= 0 {
+		http.Error(w, "Invalid account", http.StatusBadRequest)
+		return
+	}
+	if targetID == admin.ID {
+		http.Error(w, "You cannot delete your own administrator account here.", http.StatusForbidden)
+		return
+	}
+	var targetIsAdmin bool
+	if err := s.db.QueryRow(`SELECT is_admin FROM users WHERE id=$1`, targetID).Scan(&targetIsAdmin); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if targetIsAdmin {
+		http.Error(w, "Administrator accounts cannot be deleted from this screen.", http.StatusForbidden)
+		return
+	}
+	if r.FormValue("confirm") != "delete" {
+		http.Error(w, "Account deletion was not confirmed.", http.StatusBadRequest)
+		return
+	}
+	if _, err := s.db.Exec(`DELETE FROM users WHERE id=$1`, targetID); err != nil {
+		log.Printf("connectai: admin account deletion failed for user %d: %v", targetID, err)
+		http.Error(w, "Unable to delete account", http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, "/admin?deleted=1", http.StatusSeeOther)
+}
+func (s *Server) sessionsPage(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	c, _ := r.Cookie("connectai_session")
+	sum := sha256.Sum256([]byte(c.Value))
+	current := hex.EncodeToString(sum[:])
+	rows, err := s.db.Query(`SELECT created_at,expires_at,token_hash FROM sessions WHERE user_id=$1 AND expires_at>NOW() ORDER BY created_at DESC`, u.ID)
+	if err != nil {
+		http.Error(w, "Unable to load sessions", 500)
+		return
+	}
+	defer rows.Close()
+	items := []SessionInfo{}
+	for rows.Next() {
+		var x SessionInfo
+		var hash string
+		if rows.Scan(&x.CreatedAt, &x.ExpiresAt, &hash) == nil {
+			x.Current = hash == current
+			items = append(items, x)
+		}
+	}
+	s.render(w, "sessions.html", PageData{Title: "Active sessions", Active: "settings", User: u, CSRF: s.csrf(w, r), Sessions: items})
+}
+func (s *Server) revokeSessions(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	if err := r.ParseForm(); err != nil || !s.validCSRF(r) {
+		http.Error(w, "Your form expired. Refresh and try again.", 400)
+		return
+	}
+	if _, err := s.db.Exec(`DELETE FROM sessions WHERE user_id=$1`, u.ID); err != nil {
+		http.Error(w, "Unable to revoke sessions", 500)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: "connectai_session", Value: "", Path: "/", HttpOnly: true, Secure: os.Getenv("APP_ENV") == "production", SameSite: http.SameSiteLaxMode, MaxAge: -1})
+	http.Redirect(w, r, "/login?signedout=1", http.StatusSeeOther)
+}
+
 func (s *Server) findModule(slug string) (Module, bool) {
 	for _, m := range s.modules {
 		if m.Slug == slug {
@@ -404,6 +670,13 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	module, ok := s.findModule(r.PathValue("slug"))
 	if !ok {
 		http.NotFound(w, r)
+		return
+	}
+	if !s.allowRate("ai:"+fmt.Sprint(u.ID), 30, time.Minute) {
+		http.Error(w, "Too many requests. Please wait a minute and try again.", http.StatusTooManyRequests)
+		return
+	}
+	if !s.withinDailyLimit(w, u.ID) {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
@@ -445,6 +718,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	answer, err := s.gemini.Generate(ctx, instruction, history, prompt)
 	if err != nil {
+		log.Printf("connectai: Gemini chat request failed: %v", err)
 		http.Error(w, safeAIError(err), http.StatusBadGateway)
 		return
 	}
@@ -481,6 +755,13 @@ func (s *Server) analyzeUpload(w http.ResponseWriter, r *http.Request) {
 	module, ok := s.findModule(r.PathValue("slug"))
 	if !ok {
 		http.NotFound(w, r)
+		return
+	}
+	if !s.allowRate("ai:"+fmt.Sprint(u.ID), 30, time.Minute) {
+		http.Error(w, "Too many requests. Please wait a minute and try again.", http.StatusTooManyRequests)
+		return
+	}
+	if !s.withinDailyLimit(w, u.ID) {
 		return
 	}
 	if module.Slug != "documents" && module.Slug != "data" {
@@ -588,6 +869,7 @@ func (s *Server) analyzeUpload(w http.ResponseWriter, r *http.Request) {
 		answer, err = s.gemini.Generate(ctx, instruction, history, userPrompt)
 	}
 	if err != nil {
+		log.Printf("connectai: Gemini file analysis failed: %v", err)
 		http.Error(w, safeAIError(err), http.StatusBadGateway)
 		return
 	}
@@ -711,11 +993,10 @@ func moduleInstruction(m Module) string {
 }
 
 func safeAIError(err error) string {
-	msg := err.Error()
-	if strings.Contains(msg, "GEMINI_API_KEY is missing") {
-		return "Gemini is not configured. Add GEMINI_API_KEY to .env and restart ConnectAI Hub."
+	if err != nil && strings.Contains(err.Error(), "GEMINI_API_KEY is missing") {
+		return "The AI service is not configured yet. Please contact the platform administrator."
 	}
-	return "The AI service could not complete that request. Check your Gemini model and API configuration, then try again. Details: " + msg
+	return "The AI service is temporarily unavailable. Please try again in a moment."
 }
 
 func firstNonEmpty(a, b string) string {

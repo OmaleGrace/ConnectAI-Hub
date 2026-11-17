@@ -4,6 +4,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"connectai-hub/internal/database"
 	"connectai-hub/internal/web"
@@ -33,5 +34,6 @@ func main() {
 	}
 
 	log.Printf("ConnectAI Hub running at http://localhost%s", addr)
-	log.Fatal(http.ListenAndServe(addr, app.Handler()))
+	server := &http.Server{Addr: addr, Handler: app.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 20 * time.Second, WriteTimeout: 120 * time.Second, IdleTimeout: 60 * time.Second}
+	log.Fatal(server.ListenAndServe())
 }
