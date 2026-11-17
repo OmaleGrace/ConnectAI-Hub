@@ -1,8 +1,30 @@
 document.addEventListener("DOMContentLoaded", () => {
   const toggle=document.querySelector(".menu-toggle"), nav=document.querySelector(".nav-links");
   if(toggle&&nav) toggle.addEventListener("click",()=>{const open=nav.classList.toggle("open");toggle.setAttribute("aria-expanded",String(open));});
-  const search=document.getElementById("moduleSearch"), cards=document.querySelectorAll("#moduleGrid [data-search]");
-  if(search) search.addEventListener("input",()=>{const q=search.value.trim().toLowerCase();cards.forEach(card=>card.hidden=!card.dataset.search.toLowerCase().includes(q));});
+  const search=document.getElementById("moduleSearch"), cards=[...document.querySelectorAll("#moduleGrid [data-search]")];
+  const emptySearch=document.getElementById("moduleSearchEmpty");
+  if(search){
+    const filterTools=()=>{const q=search.value.trim().toLocaleLowerCase();let shown=0;cards.forEach(card=>{const haystack=(card.dataset.search||card.textContent||"").toLocaleLowerCase();const match=!q||haystack.includes(q);card.hidden=!match;if(match)shown++;});if(emptySearch)emptySearch.hidden=shown!==0;};
+    search.addEventListener("input",filterTools);search.addEventListener("search",filterTools);filterTools();
+  }
+  // First-visit guided tour, with a persistent manual replay button.
+  const tour=document.getElementById("connectAITour");
+  if(tour){
+    const steps=[
+      ["Your AI workspace, all in one place.","Your dashboard brings your seven AI workspaces together so you can get started quickly."],
+      ["Find the right AI tool.","Use the dashboard search to find tools by name or by what they help you do."],
+      ["Choose a workspace.","Open Study, Career, Business, Document, Website, Support or Data AI to start a focused conversation."],
+      ["Keep track of your usage.","Your plan card shows today's AI requests, your allowance and how much remains."],
+      ["Make the workspace yours.","Visit Account to change your theme, manage sessions and review your profile. You can replay this tour from the navigation anytime."]
+    ];
+    let index=0;const title=document.getElementById("tourTitle"),desc=document.getElementById("tourDescription"),count=document.getElementById("tourStepCount"),progress=document.getElementById("tourProgress"),back=document.getElementById("tourBack"),next=document.getElementById("tourNext");
+    const close=()=>{tour.classList.remove("open");tour.setAttribute("aria-hidden","true");document.body.style.overflow="";try{localStorage.setItem("connectai-tour-v1","done")}catch(_){}};
+    const render=()=>{title.textContent=steps[index][0];desc.textContent=steps[index][1];count.textContent=`STEP ${index+1} OF ${steps.length}`;progress.style.width=`${((index+1)/steps.length)*100}%`;back.disabled=index===0;next.textContent=index===steps.length-1?"Finish ✓":"Next →";};
+    const open=()=>{index=0;render();tour.classList.add("open");tour.setAttribute("aria-hidden","false");document.body.style.overflow="hidden";next.focus();};
+    document.querySelectorAll("[data-tour-start]").forEach(button=>button.addEventListener("click",open));document.getElementById("tourSkip")?.addEventListener("click",close);back?.addEventListener("click",()=>{if(index>0){index--;render();}});next?.addEventListener("click",()=>{if(index===steps.length-1){close();return;}index++;render();});
+    tour.addEventListener("click",e=>{if(e.target===tour)close();});document.addEventListener("keydown",e=>{if(e.key==="Escape"&&tour.classList.contains("open"))close();});
+    if(location.pathname==="/dashboard"){let done=false;try{done=localStorage.getItem("connectai-tour-v1")==="done"}catch(_){}if(!done)open();}
+  }
 
   const form=document.getElementById("chatForm");
   if(form){
@@ -145,27 +167,55 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 })();
 
-// Progressive Web App installation (Chrome / Edge / supported Android browsers).
+// Progressive Web App installation. Never leave the button in a loading state.
 let connectAIInstallPrompt = null;
+const installButtons = () => document.querySelectorAll("[data-install-app]");
 window.addEventListener("beforeinstallprompt", (event) => {
   event.preventDefault();
   connectAIInstallPrompt = event;
-  document.querySelectorAll("[data-install-app]").forEach((button) => { button.hidden = false; });
+  installButtons().forEach((button) => { button.hidden = false; button.disabled = false; button.textContent = "Install app"; });
+});
+window.addEventListener("appinstalled", () => {
+  connectAIInstallPrompt = null;
+  installButtons().forEach((button) => { button.hidden = true; button.disabled = false; });
 });
 document.addEventListener("click", async (event) => {
   const button = event.target.closest("[data-install-app]");
   if (!button) return;
   if (!connectAIInstallPrompt) {
-    alert("To install ConnectAI Hub, open this website in Chrome, tap ⋮, then choose Install app or Add to Home screen.");
+    const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
+    alert(ios ? "To add ConnectAI Hub, tap Share in Safari, then choose Add to Home Screen." : "If installation is available, open this site in Chrome or Edge and use the browser menu → Install ConnectAI Hub (or Add to Home screen). If the option is missing, check that the site is online and reload it.");
     return;
   }
-  connectAIInstallPrompt.prompt();
-  await connectAIInstallPrompt.userChoice;
+  const promptEvent = connectAIInstallPrompt;
   connectAIInstallPrompt = null;
-  document.querySelectorAll("[data-install-app]").forEach((item) => { item.hidden = true; });
+  button.disabled = true;
+  button.textContent = "Opening install…";
+  try {
+    await promptEvent.prompt();
+    const choice = await Promise.race([
+      promptEvent.userChoice,
+      new Promise((resolve) => setTimeout(() => resolve({outcome: "dismissed", timedOut: true}), 15000))
+    ]);
+    if (choice && choice.outcome === "accepted") {
+      button.textContent = "Installing…";
+      setTimeout(() => { button.disabled = false; button.textContent = "Install app"; }, 8000);
+    } else {
+      button.textContent = "Install app";
+      button.disabled = false;
+    }
+  } catch (_) {
+    button.textContent = "Install app";
+    button.disabled = false;
+    alert("The browser could not start installation. Reload the page and try again, or use the browser menu → Install app.");
+  }
 });
 if ("serviceWorker" in navigator && location.protocol === "https:") {
-  window.addEventListener("load", () => navigator.serviceWorker.register("/service-worker.js").catch(() => {}));
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/service-worker.js", {updateViaCache: "none"})
+      .then((registration) => registration.update().catch(() => {}))
+      .catch((error) => console.warn("ConnectAI service worker unavailable:", error));
+  });
 }
 
 // Authentication helpers: password visibility and live input feedback.

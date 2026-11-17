@@ -40,8 +40,15 @@ type User struct {
 type PageData struct {
 	Title, Active, CSRF, Error, Success, Name string
 	UsageTotal, UsageMonth                    int64
+	DailyUsed, DailyRemaining, UserDailyLimit int64
+	UserPlan                                  string
+	PlusPriceNaira                            int64
+	PlusExpiresAt                             time.Time
 	AdminUsers, AdminRequests, DailyLimit     int64
 	AdminUserList                             []AdminUserInfo
+	AdminUserDetail                           *AdminUserInfo
+	AdminPage, AdminPages                     int
+	AdminQuery, AdminPurpose                  string
 	ModuleUsage                               []ModuleUsage
 	Sessions                                  []SessionInfo
 	Modules                                   []Module
@@ -57,7 +64,9 @@ type AdminUserInfo struct {
 	ID                                        int64
 	Name, Email, Phone, Purpose, Organization string
 	CreatedAt                                 time.Time
-	Requests                                  int64
+	Requests, DailyLimit                      int64
+	Plan                                      string
+	IsAdmin, Suspended                        bool
 }
 type SessionInfo struct {
 	CreatedAt, ExpiresAt time.Time
@@ -78,7 +87,19 @@ type Server struct {
 }
 
 func New(db *sql.DB) (*Server, error) {
-	t, err := template.ParseGlob(filepath.Join("templates", "*.html"))
+	t, err := template.New("pages").Funcs(template.FuncMap{"add": func(a, b int) int { return a + b }, "subtract": func(a, b int) int { return a - b }, "mulPercent": func(used, limit int64) int {
+		if limit <= 0 {
+			return 0
+		}
+		v := int(used * 100 / limit)
+		if v > 100 {
+			return 100
+		}
+		if v < 0 {
+			return 0
+		}
+		return v
+	}, "slice": func(values ...string) []string { return values }}).ParseGlob(filepath.Join("templates", "*.html"))
 	if err != nil {
 		return nil, err
 	}
@@ -138,11 +159,16 @@ func (s *Server) routes() {
 	})
 	s.mux.HandleFunc("GET /{$}", s.home)
 	s.mux.HandleFunc("GET /dashboard", s.dashboard)
+	s.mux.HandleFunc("POST /billing/plus", s.startPlusPayment)
+	s.mux.HandleFunc("GET /billing/callback", s.finishPlusPayment)
 	s.mux.HandleFunc("GET /settings", s.settingsPage)
 	s.mux.HandleFunc("GET /settings/sessions", s.sessionsPage)
 	s.mux.HandleFunc("POST /settings/sessions/revoke", s.revokeSessions)
 	s.mux.HandleFunc("GET /admin", s.adminDashboard)
 	s.mux.HandleFunc("POST /admin/users/{id}/delete", s.adminDeleteUser)
+	s.mux.HandleFunc("GET /admin/users/{id}", s.adminUserDetail)
+	s.mux.HandleFunc("POST /admin/users/{id}/status", s.adminUserStatus)
+	s.mux.HandleFunc("POST /admin/users/{id}/plan", s.adminUserPlan)
 	s.mux.HandleFunc("POST /settings/profile", s.updateProfile)
 	s.mux.HandleFunc("POST /settings/password", s.updatePassword)
 	s.mux.HandleFunc("POST /settings/password-reset", s.requestPasswordReset)
@@ -194,7 +220,7 @@ func (s *Server) currentUser(r *http.Request) *User {
 	sum := sha256.Sum256([]byte(c.Value))
 	hash := hex.EncodeToString(sum[:])
 	var u User
-	err = s.db.QueryRow(`SELECT u.id,u.name,u.email,u.is_admin FROM users u JOIN sessions s ON s.user_id=u.id WHERE s.token_hash=$1 AND s.expires_at>NOW()`, hash).Scan(&u.ID, &u.Name, &u.Email, &u.IsAdmin)
+	err = s.db.QueryRow(`SELECT u.id,u.name,u.email,u.is_admin FROM users u JOIN sessions s ON s.user_id=u.id WHERE s.token_hash=$1 AND s.expires_at>NOW() AND COALESCE(u.is_suspended,FALSE)=FALSE`, hash).Scan(&u.ID, &u.Name, &u.Email, &u.IsAdmin)
 	if err != nil {
 		return nil
 	}
@@ -226,7 +252,12 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	var total, month int64
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM ai_usage WHERE user_id=$1`, u.ID).Scan(&total)
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM ai_usage WHERE user_id=$1 AND created_at >= date_trunc('month', NOW())`, u.ID).Scan(&month)
-	s.render(w, "dashboard.html", PageData{Title: "Your workspace", Modules: s.modules, Active: "dashboard", User: u, CSRF: s.csrf(w, r), UsageTotal: total, UsageMonth: month})
+	plan, limit, used := s.userUsage(u.ID)
+	remaining := limit - used
+	if remaining < 0 {
+		remaining = 0
+	}
+	s.render(w, "dashboard.html", PageData{Title: "Your workspace", Modules: s.modules, Active: "dashboard", User: u, CSRF: s.csrf(w, r), UsageTotal: total, UsageMonth: month, UserPlan: plan, UserDailyLimit: limit, DailyUsed: used, DailyRemaining: remaining, PlusPriceNaira: paystackPlusPriceNaira(), Name: map[string]string{"success": "success", "active": "active", "unverified": "unverified"}[r.URL.Query().Get("billing")]})
 }
 func (s *Server) module(w http.ResponseWriter, r *http.Request) {
 	u := s.currentUser(r)
@@ -326,8 +357,9 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	var id int64
 	var hash string
-	err := s.db.QueryRow(`SELECT id,password_hash FROM users WHERE email=$1`, email).Scan(&id, &hash)
-	if err != nil || !auth.VerifyPassword(password, hash) {
+	var suspended bool
+	err := s.db.QueryRow(`SELECT id,password_hash,COALESCE(is_suspended,FALSE) FROM users WHERE email=$1`, email).Scan(&id, &hash, &suspended)
+	if err != nil || suspended || !auth.VerifyPassword(password, hash) {
 		s.render(w, "login.html", PageData{Title: "Log in", CSRF: s.csrf(w, r), Error: "Email or password is incorrect."})
 		return
 	}
@@ -502,22 +534,193 @@ func (s *Server) allowRate(key string, max int, window time.Duration) bool {
 	}
 	return true
 }
-func (s *Server) withinDailyLimit(w http.ResponseWriter, userID int64) bool {
+
+type paystackInitResponse struct {
+	Status  bool   `json:"status"`
+	Message string `json:"message"`
+	Data    struct {
+		AuthorizationURL string `json:"authorization_url"`
+	} `json:"data"`
+}
+type paystackVerifyResponse struct {
+	Status bool `json:"status"`
+	Data   struct {
+		Status    string `json:"status"`
+		Reference string `json:"reference"`
+		Amount    int64  `json:"amount"`
+		Currency  string `json:"currency"`
+	} `json:"data"`
+}
+
+func paystackPlusPriceNaira() int64 {
+	kobo, err := strconv.ParseInt(strings.TrimSpace(os.Getenv("PAYSTACK_PLUS_AMOUNT_KOBO")), 10, 64)
+	if err != nil || kobo < 5000 || kobo%100 != 0 {
+		return 0
+	}
+	return kobo / 100
+}
+func (s *Server) startPlusPayment(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	if err := r.ParseForm(); err != nil || !s.validCSRF(r) {
+		http.Error(w, "Your form expired. Refresh and try again.", 400)
+		return
+	}
+	secret := strings.TrimSpace(os.Getenv("PAYSTACK_SECRET_KEY"))
+	base := strings.TrimRight(strings.TrimSpace(os.Getenv("APP_BASE_URL")), "/")
+	kobo, err := strconv.ParseInt(strings.TrimSpace(os.Getenv("PAYSTACK_PLUS_AMOUNT_KOBO")), 10, 64)
+	if secret == "" || base == "" || err != nil || kobo < 5000 || kobo%100 != 0 {
+		http.Error(w, "Plus checkout is not configured yet. Please contact the site administrator.", http.StatusServiceUnavailable)
+		return
+	}
+	if plan, _, _ := s.userUsage(u.ID); plan == "plus" {
+		var expiry sql.NullTime
+		_ = s.db.QueryRow(`SELECT plus_expires_at FROM users WHERE id=$1`, u.ID).Scan(&expiry)
+		if !expiry.Valid {
+			http.Redirect(w, r, "/dashboard?billing=active", http.StatusSeeOther)
+			return
+		}
+	}
+	raw := make([]byte, 16)
+	if _, err := rand.Read(raw); err != nil {
+		http.Error(w, "Unable to start checkout.", 500)
+		return
+	}
+	reference := "cah" + hex.EncodeToString(raw)
+	if _, err := s.db.Exec(`INSERT INTO plan_payments(user_id,reference,amount,currency,status) VALUES($1,$2,$3,'NGN','pending')`, u.ID, reference, kobo); err != nil {
+		http.Error(w, "Unable to create payment record.", 500)
+		return
+	}
+	payload, _ := json.Marshal(map[string]any{"email": u.Email, "amount": kobo, "currency": "NGN", "reference": reference, "callback_url": base + "/billing/callback"})
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.paystack.co/transaction/initialize", bytes.NewReader(payload))
+	req.Header.Set("Authorization", "Bearer "+secret)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		_, _ = s.db.Exec(`UPDATE plan_payments SET status='failed' WHERE reference=$1`, reference)
+		http.Error(w, "Payment provider could not be reached. Please try again.", 502)
+		return
+	}
+	defer resp.Body.Close()
+	var result paystackInitResponse
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 || json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result) != nil || !result.Status || !strings.HasPrefix(result.Data.AuthorizationURL, "https://checkout.paystack.com/") {
+		_, _ = s.db.Exec(`UPDATE plan_payments SET status='failed' WHERE reference=$1`, reference)
+		http.Error(w, "Payment checkout could not be initialized. Please try again.", 502)
+		return
+	}
+	http.Redirect(w, r, result.Data.AuthorizationURL, http.StatusSeeOther)
+}
+func (s *Server) finishPlusPayment(w http.ResponseWriter, r *http.Request) {
+	// Paystack may return trxref as well as reference. Do not require the
+	// browser session here: the unique pending reference identifies the owner,
+	// and the payment is activated only after server-side verification.
+	reference := strings.TrimSpace(r.URL.Query().Get("reference"))
+	if reference == "" {
+		reference = strings.TrimSpace(r.URL.Query().Get("trxref"))
+	}
+	if reference == "" || len(reference) > 100 {
+		http.Redirect(w, r, "/dashboard?billing=unverified", http.StatusSeeOther)
+		return
+	}
+	var amount int64
+	var status string
+	var owner int64
+	if err := s.db.QueryRow(`SELECT user_id,amount,status FROM plan_payments WHERE reference=$1`, reference).Scan(&owner, &amount, &status); err != nil {
+		http.Redirect(w, r, "/login?billing=unverified", http.StatusSeeOther)
+		return
+	}
+	if status == "paid" {
+		if s.currentUser(r) != nil {
+			http.Redirect(w, r, "/dashboard?billing=active", http.StatusSeeOther)
+		} else {
+			http.Redirect(w, r, "/login?billing=active", http.StatusSeeOther)
+		}
+		return
+	}
+	secret := strings.TrimSpace(os.Getenv("PAYSTACK_SECRET_KEY"))
+	if secret == "" {
+		http.Error(w, "Payment verification is unavailable.", 503)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.paystack.co/transaction/verify/"+reference, nil)
+	if err != nil {
+		http.Error(w, "Unable to verify payment.", 502)
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+secret)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		http.Error(w, "Unable to verify payment. Please refresh in a moment.", 502)
+		return
+	}
+	defer resp.Body.Close()
+	var verified paystackVerifyResponse
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 || json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&verified) != nil || !verified.Status || verified.Data.Status != "success" || verified.Data.Reference != reference || verified.Data.Amount != amount || verified.Data.Currency != "NGN" {
+		http.Redirect(w, r, "/dashboard?billing=unverified", http.StatusSeeOther)
+		return
+	}
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		http.Error(w, "Unable to activate Plus.", 500)
+		return
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`UPDATE plan_payments SET status='paid',paid_at=NOW() WHERE reference=$1 AND user_id=$2 AND status='pending'`, reference, owner)
+	if err != nil {
+		http.Error(w, "Unable to record payment.", 500)
+		return
+	}
+	changed, _ := res.RowsAffected()
+	if changed == 1 {
+		_, err = tx.Exec(`UPDATE users SET plan='plus',daily_limit=10000,plus_expires_at=GREATEST(COALESCE(plus_expires_at,NOW()),NOW())+INTERVAL '30 days' WHERE id=$1`, owner)
+		if err != nil {
+			http.Error(w, "Payment recorded but plan activation failed. Contact support.", 500)
+			return
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		http.Error(w, "Unable to complete plan activation.", 500)
+		return
+	}
+	if s.currentUser(r) != nil {
+		http.Redirect(w, r, "/dashboard?billing=success", http.StatusSeeOther)
+	} else {
+		http.Redirect(w, r, "/login?billing=success", http.StatusSeeOther)
+	}
+}
+
+func (s *Server) userUsage(userID int64) (string, int64, int64) {
+	// Expired paid passes automatically return to the free allowance.
+	_, _ = s.db.Exec(`UPDATE users SET plan='free',daily_limit=100,plus_expires_at=NULL WHERE id=$1 AND plan='plus' AND plus_expires_at IS NOT NULL AND plus_expires_at<=NOW()`, userID)
+	plan := "free"
 	limit := int64(100)
+	var custom sql.NullInt64
+	_ = s.db.QueryRow(`SELECT COALESCE(plan,'free'),daily_limit FROM users WHERE id=$1`, userID).Scan(&plan, &custom)
+	if custom.Valid && custom.Int64 > 0 {
+		limit = custom.Int64
+	}
 	if raw := strings.TrimSpace(os.Getenv("DAILY_AI_REQUEST_LIMIT")); raw != "" {
-		if n, err := strconv.ParseInt(raw, 10, 64); err == nil && n > 0 && n <= 10000 {
+		if n, err := strconv.ParseInt(raw, 10, 64); err == nil && n > 0 && n <= 10000 && plan == "free" && !custom.Valid {
 			limit = n
 		}
 	}
 	var used int64
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM ai_usage WHERE user_id=$1 AND created_at >= date_trunc('day', NOW())`, userID).Scan(&used); err != nil {
-		http.Error(w, "Unable to check your daily usage. Please try again.", 500)
-		return false
-	}
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM ai_usage WHERE user_id=$1 AND created_at >= date_trunc('day', NOW())`, userID).Scan(&used)
+	return plan, limit, used
+}
+func (s *Server) withinDailyLimit(w http.ResponseWriter, userID int64) bool {
+	_, limit, used := s.userUsage(userID)
 	if used >= limit {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
-		_ = json.NewEncoder(w).Encode(chatResponse{Error: fmt.Sprintf("You've reached today's AI request limit (%d). Please try again tomorrow.", limit)})
+		_ = json.NewEncoder(w).Encode(chatResponse{Error: fmt.Sprintf("You've used all %d AI requests available for today. Please try again tomorrow.", limit)})
 		return false
 	}
 	return true
@@ -541,24 +744,168 @@ func (s *Server) adminDashboard(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
-			var item ModuleUsage
-			if rows.Scan(&item.Name, &item.Count) == nil {
-				usage = append(usage, item)
+			var x ModuleUsage
+			if rows.Scan(&x.Name, &x.Count) == nil {
+				usage = append(usage, x)
 			}
 		}
 	}
-	userList := make([]AdminUserInfo, 0)
-	userRows, userErr := s.db.Query(`SELECT u.id,u.name,u.email,COALESCE(u.phone,''),COALESCE(u.purpose,''),COALESCE(u.organization,''),u.created_at,COUNT(a.id) FROM users u LEFT JOIN ai_usage a ON a.user_id=u.id GROUP BY u.id ORDER BY u.created_at DESC`)
-	if userErr == nil {
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	if page < 1 {
+		page = 1
+	}
+	if page > 100000 {
+		page = 1
+	}
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	purpose := strings.TrimSpace(r.URL.Query().Get("purpose"))
+	if len(query) > 100 {
+		query = query[:100]
+	}
+	where := ` WHERE ($1='' OR u.name ILIKE '%'||$1||'%' OR u.email ILIKE '%'||$1||'%') AND ($2='' OR u.purpose=$2)`
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM users u`+where, query, purpose).Scan(&count); err != nil {
+		http.Error(w, "Unable to load users", 500)
+		return
+	}
+	const pageSize = 10
+	pages := (count + pageSize - 1) / pageSize
+	if pages < 1 {
+		pages = 1
+	}
+	if page > pages {
+		page = pages
+	}
+	userList := make([]AdminUserInfo, 0, pageSize)
+	userRows, e := s.db.Query(`SELECT u.id,u.name,u.email,COALESCE(u.phone,''),COALESCE(u.purpose,''),COALESCE(u.organization,''),u.created_at,COUNT(a.id),u.is_admin,COALESCE(u.is_suspended,FALSE),COALESCE(u.plan,'free'),COALESCE(u.daily_limit,0) FROM users u LEFT JOIN ai_usage a ON a.user_id=u.id`+where+` GROUP BY u.id ORDER BY u.created_at DESC LIMIT $3 OFFSET $4`, query, purpose, pageSize, (page-1)*pageSize)
+	if e == nil {
 		defer userRows.Close()
 		for userRows.Next() {
-			var item AdminUserInfo
-			if userRows.Scan(&item.ID, &item.Name, &item.Email, &item.Phone, &item.Purpose, &item.Organization, &item.CreatedAt, &item.Requests) == nil {
-				userList = append(userList, item)
+			var x AdminUserInfo
+			if userRows.Scan(&x.ID, &x.Name, &x.Email, &x.Phone, &x.Purpose, &x.Organization, &x.CreatedAt, &x.Requests, &x.IsAdmin, &x.Suspended, &x.Plan, &x.DailyLimit) == nil {
+				userList = append(userList, x)
 			}
 		}
+	} else {
+		http.Error(w, "Unable to load users", 500)
+		return
 	}
-	s.render(w, "admin.html", PageData{Title: "Admin dashboard", Active: "admin", User: u, CSRF: s.csrf(w, r), AdminUsers: users, AdminRequests: requests, UsageMonth: today, ModuleUsage: usage, AdminUserList: userList, Name: map[string]string{"1": "deleted"}[r.URL.Query().Get("deleted")]})
+	s.render(w, "admin.html", PageData{Title: "Admin dashboard", Active: "admin", User: u, CSRF: s.csrf(w, r), AdminUsers: users, AdminRequests: requests, UsageMonth: today, ModuleUsage: usage, AdminUserList: userList, AdminPage: page, AdminPages: pages, AdminQuery: query, AdminPurpose: purpose, Name: map[string]string{"1": "deleted", "suspended": "suspended", "active": "active"}[r.URL.Query().Get("status")]})
+}
+
+func (s *Server) adminUserDetail(w http.ResponseWriter, r *http.Request) {
+	admin := s.currentUser(r)
+	if admin == nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	if !admin.IsAdmin {
+		http.NotFound(w, r)
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		http.NotFound(w, r)
+		return
+	}
+	var x AdminUserInfo
+	err = s.db.QueryRow(`SELECT u.id,u.name,u.email,COALESCE(u.phone,''),COALESCE(u.purpose,''),COALESCE(u.organization,''),u.created_at,COUNT(a.id),u.is_admin,COALESCE(u.is_suspended,FALSE),COALESCE(u.plan,'free'),COALESCE(u.daily_limit,0) FROM users u LEFT JOIN ai_usage a ON a.user_id=u.id WHERE u.id=$1 GROUP BY u.id`, id).Scan(&x.ID, &x.Name, &x.Email, &x.Phone, &x.Purpose, &x.Organization, &x.CreatedAt, &x.Requests, &x.IsAdmin, &x.Suspended, &x.Plan, &x.DailyLimit)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	s.render(w, "admin-user.html", PageData{Title: "User profile", Active: "admin", User: admin, CSRF: s.csrf(w, r), AdminUserDetail: &x, Name: map[string]string{"suspended": "suspended", "active": "active", "updated": "updated"}[firstNonEmpty(r.URL.Query().Get("status"), r.URL.Query().Get("plan"))]})
+}
+
+func (s *Server) adminUserStatus(w http.ResponseWriter, r *http.Request) {
+	admin := s.currentUser(r)
+	if admin == nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	if !admin.IsAdmin {
+		http.NotFound(w, r)
+		return
+	}
+	if err := r.ParseForm(); err != nil || !s.validCSRF(r) {
+		http.Error(w, "Your form expired. Refresh and try again.", 400)
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 || id == admin.ID {
+		http.Error(w, "Invalid account", 400)
+		return
+	}
+	var isAdmin bool
+	if err = s.db.QueryRow(`SELECT is_admin FROM users WHERE id=$1`, id).Scan(&isAdmin); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if isAdmin {
+		http.Error(w, "Administrator accounts cannot be suspended here.", 403)
+		return
+	}
+	status := r.FormValue("status")
+	if status != "active" && status != "suspended" {
+		http.Error(w, "Invalid status", 400)
+		return
+	}
+	_, err = s.db.Exec(`UPDATE users SET is_suspended=$1 WHERE id=$2`, status == "suspended", id)
+	if err != nil {
+		http.Error(w, "Unable to update account status", 500)
+		return
+	}
+	http.Redirect(w, r, fmt.Sprintf("/admin/users/%d?status=%s", id, status), http.StatusSeeOther)
+}
+
+func (s *Server) adminUserPlan(w http.ResponseWriter, r *http.Request) {
+	admin := s.currentUser(r)
+	if admin == nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	if !admin.IsAdmin {
+		http.NotFound(w, r)
+		return
+	}
+	if err := r.ParseForm(); err != nil || !s.validCSRF(r) {
+		http.Error(w, "Your form expired. Refresh and try again.", 400)
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 || id == admin.ID {
+		http.Error(w, "Invalid account", 400)
+		return
+	}
+	var isAdmin bool
+	if err = s.db.QueryRow(`SELECT is_admin FROM users WHERE id=$1`, id).Scan(&isAdmin); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if isAdmin {
+		http.Error(w, "Administrator plans cannot be changed here.", 403)
+		return
+	}
+	plan := r.FormValue("plan")
+	if plan != "free" && plan != "plus" {
+		http.Error(w, "Choose a valid plan.", 400)
+		return
+	}
+	limit, err := strconv.ParseInt(r.FormValue("daily_limit"), 10, 64)
+	if err != nil || limit < 1 || limit > 10000 {
+		http.Error(w, "Daily limit must be between 1 and 10000.", 400)
+		return
+	}
+	if plan == "free" && limit > 1000 {
+		http.Error(w, "Free plan limit cannot exceed 1000.", 400)
+		return
+	}
+	_, err = s.db.Exec(`UPDATE users SET plan=$1,daily_limit=$2 WHERE id=$3`, plan, limit, id)
+	if err != nil {
+		http.Error(w, "Unable to update plan.", 500)
+		return
+	}
+	http.Redirect(w, r, fmt.Sprintf("/admin/users/%d?plan=updated", id), http.StatusSeeOther)
 }
 
 func (s *Server) adminDeleteUser(w http.ResponseWriter, r *http.Request) {

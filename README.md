@@ -291,3 +291,36 @@ The app does not silently create or retain database backups. Run `scripts/backup
 - `DAILY_AI_REQUEST_LIMIT=100` (optional; 100 is the default)
 
 Existing database schema is extended safely by `database.Migrate`; the standalone migration is also included for manual migration workflows.
+
+## Batch 13 update
+
+- Admin user directory supports name/email search, purpose filters and 10-user pagination.
+- Admins can open an individual account profile, suspend/reactivate regular accounts, and permanently delete regular accounts.
+- Suspended users cannot sign in. Administrator accounts are protected from suspension/deletion through the user-management screen.
+- The automatic database migration adds `users.is_suspended`; `migrations/005_user_suspension.sql` is provided for manual migration workflows.
+- PWA installation was hardened: the service worker no longer blocks activation on a single `cache.addAll()` failure, static cache refresh is best-effort, old cache versions are cleaned up, and the install button resets on dismissal/errors/timeouts.
+
+
+## Batch 14 — Usage and plan controls
+
+- The user dashboard displays the current plan, today's AI requests used, the daily allowance, and remaining requests.
+- Accounts have a `free` or `plus` plan label and an individually configurable daily AI request limit.
+- Administrators can change a non-admin user's plan and daily request allowance from that user's profile.
+- Daily limits are enforced for both chat and file-analysis requests.
+- This batch adds plan labels and usage controls only. It does not activate paid subscriptions, billing, or payment processing.
+- Database startup migration adds `plan` and `daily_limit`; the equivalent SQL is in `migrations/006_user_plans.sql`.
+
+
+## ConnectAI Plus payments (optional)
+
+The Plus checkout uses Paystack's server-side transaction initialization and verification flow. Configure these Render environment variables using the payment account owner's approved credentials:
+
+- `PAYSTACK_SECRET_KEY` — keep private; never put this in browser JavaScript or commit it.
+- `PAYSTACK_PLUS_AMOUNT_KOBO` — monthly price in kobo (for example, `500000` means ₦5,000). The app rejects values below Paystack's NGN minimum.
+- `APP_BASE_URL` — the deployed HTTPS origin, such as `https://connectai-hub.onrender.com`.
+
+A successful verified payment activates Plus for 30 days with a 10,000-request daily allowance. It is a one-time 30-day pass, not automatic recurring billing; users must renew manually. Test with the provider's test credentials before any live launch. A responsible adult or the business account owner should manage payment-provider onboarding and credentials.
+
+## Dashboard onboarding
+
+The dashboard tool search filters the seven module cards as you type. A first-visit guided tour appears once per browser; users can replay it using **Take a tour** in the navigation or from Account settings.
