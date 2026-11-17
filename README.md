@@ -79,6 +79,15 @@ Supported formats include CSV, XLSX, TXT, Markdown, JSON and LOG.
 
 ## 🔐 Account Features
 
+- Unique email address per account; registered email cannot be edited.
+- Password policy: at least 8 characters with a letter, number and symbol.
+- Show/hide password controls and live registration checks.
+- Email-based password reset links expire after 30 minutes.
+- Account deletion requires password confirmation.
+- Configure `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` and `APP_BASE_URL` in the deployment environment to enable password-reset email delivery.
+
+
+
 - User registration and login.
 - Secure password hashing.
 - Session-based authentication.
@@ -189,6 +198,7 @@ ConnectAI Hub uses PostgreSQL to manage:
 - Authentication sessions.
 - AI conversation history.
 - Module-specific conversations.
+- AI usage activity records, linked to each user account.
 
 The application connects to the configured PostgreSQL database and manages its required tables through its database setup process.
 
@@ -200,13 +210,21 @@ The application connects to the configured PostgreSQL database and manages its r
 - Uploaded documents are processed in memory rather than permanently stored by the application.
 - Uploaded documents are sent to Google Gemini for analysis. Avoid uploading sensitive or confidential information.
 
+## 👤 Account Settings and Usage (Batch 7)
+
+- Update your account name and email address.
+- Change your password after verifying the current password.
+- Changing a password revokes existing sessions and signs the current user back in.
+- Dashboard and account settings show all-time and current-month AI request counts.
+- Successful chat and file-analysis requests are recorded in `ai_usage`.
+- Usage counts represent successful saved requests; they are not billing amounts or token estimates.
+
+The application creates the `ai_usage` table automatically during database startup. The matching SQL migration is also available at `migrations/002_ai_usage.sql`.
+
 ## 🚧 Future Improvements
 
 Potential areas for future development include:
 
-- User profile management.
-- Account settings.
-- Usage analytics and tracking.
 - More document formats and advanced file processing.
 - AI-generated reports and exports.
 - Additional productivity tools.

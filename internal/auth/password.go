@@ -8,13 +8,14 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 const passwordIterations = 310000
 
 func HashPassword(password string) (string, error) {
-	if len(password) < 10 {
-		return "", errors.New("password must contain at least 10 characters")
+	if err := ValidatePassword(password); err != nil {
+		return "", err
 	}
 	salt := make([]byte, 16)
 	if _, err := rand.Read(salt); err != nil {
@@ -68,4 +69,27 @@ func pbkdf2(password, salt []byte, iterations, keyLen int) []byte {
 		out = append(out, t...)
 	}
 	return out[:keyLen]
+}
+
+// ValidatePassword enforces the account password policy.
+func ValidatePassword(password string) error {
+	if len(password) < 8 {
+		return errors.New("password must be at least 8 characters")
+	}
+	var letter, digit, symbol bool
+	for _, r := range password {
+		if unicode.IsLetter(r) {
+			letter = true
+		}
+		if unicode.IsDigit(r) {
+			digit = true
+		}
+		if unicode.IsPunct(r) || unicode.IsSymbol(r) {
+			symbol = true
+		}
+	}
+	if !letter || !digit || !symbol {
+		return errors.New("password must include at least one letter, one number and one symbol")
+	}
+	return nil
 }

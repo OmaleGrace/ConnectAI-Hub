@@ -9,9 +9,11 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"html/template"
 	"io"
 	"net/http"
+	"net/smtp"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,11 +33,12 @@ type User struct {
 	Name, Email string
 }
 type PageData struct {
-	Title, Active, CSRF, Error, Name string
-	Modules                          []Module
-	Module                           Module
-	QuickPrompts                     []string
-	User                             *User
+	Title, Active, CSRF, Error, Success, Name string
+	UsageTotal, UsageMonth                    int64
+	Modules                                   []Module
+	Module                                    Module
+	QuickPrompts                              []string
+	User                                      *User
 }
 type Server struct {
 	mux     *http.ServeMux
@@ -71,6 +74,15 @@ func (s *Server) routes() {
 	})
 	s.mux.HandleFunc("GET /{$}", s.home)
 	s.mux.HandleFunc("GET /dashboard", s.dashboard)
+	s.mux.HandleFunc("GET /settings", s.settingsPage)
+	s.mux.HandleFunc("POST /settings/profile", s.updateProfile)
+	s.mux.HandleFunc("POST /settings/password", s.updatePassword)
+	s.mux.HandleFunc("POST /settings/password-reset", s.requestPasswordReset)
+	s.mux.HandleFunc("POST /settings/delete", s.deleteAccount)
+	s.mux.HandleFunc("GET /forgot-password", s.forgotPasswordPage)
+	s.mux.HandleFunc("POST /forgot-password", s.forgotPassword)
+	s.mux.HandleFunc("GET /reset-password", s.resetPasswordPage)
+	s.mux.HandleFunc("POST /reset-password", s.resetPassword)
 	s.mux.HandleFunc("GET /modules", s.dashboard)
 	s.mux.HandleFunc("GET /modules/{slug}", s.module)
 	s.mux.HandleFunc("GET /register", s.registerPage)
@@ -143,7 +155,10 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
-	s.render(w, "dashboard.html", PageData{Title: "Your workspace", Modules: s.modules, Active: "dashboard", User: u, CSRF: s.csrf(w, r)})
+	var total, month int64
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM ai_usage WHERE user_id=$1`, u.ID).Scan(&total)
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM ai_usage WHERE user_id=$1 AND created_at >= date_trunc('month', NOW())`, u.ID).Scan(&month)
+	s.render(w, "dashboard.html", PageData{Title: "Your workspace", Modules: s.modules, Active: "dashboard", User: u, CSRF: s.csrf(w, r), UsageTotal: total, UsageMonth: month})
 }
 func (s *Server) module(w http.ResponseWriter, r *http.Request) {
 	u := s.currentUser(r)
@@ -163,7 +178,11 @@ func (s *Server) registerPage(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "register.html", PageData{Title: "Create account", CSRF: s.csrf(w, r)})
 }
 func (s *Server) loginPage(w http.ResponseWriter, r *http.Request) {
-	s.render(w, "login.html", PageData{Title: "Log in", CSRF: s.csrf(w, r)})
+	success := ""
+	if r.URL.Query().Get("reset") == "1" {
+		success = "reset"
+	}
+	s.render(w, "login.html", PageData{Title: "Log in", CSRF: s.csrf(w, r), Success: success})
 }
 func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
@@ -177,7 +196,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimSpace(r.FormValue("name"))
 	email := strings.ToLower(strings.TrimSpace(r.FormValue("email")))
 	password := r.FormValue("password")
-	if len(name) < 2 || len(name) > 80 || !strings.Contains(email, "@") || len(email) > 254 {
+	if len([]rune(name)) < 3 || len([]rune(name)) > 80 || !validEmail(email) {
 		s.render(w, "register.html", PageData{Title: "Create account", CSRF: s.csrf(w, r), Error: "Enter a valid name and email address."})
 		return
 	}
@@ -209,6 +228,10 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	email := strings.ToLower(strings.TrimSpace(r.FormValue("email")))
 	password := r.FormValue("password")
+	if !validEmail(email) {
+		s.render(w, "login.html", PageData{Title: "Log in", CSRF: s.csrf(w, r), Error: "Enter a valid email address."})
+		return
+	}
 	var id int64
 	var hash string
 	err := s.db.QueryRow(`SELECT id,password_hash FROM users WHERE email=$1`, email).Scan(&id, &hash)
@@ -237,6 +260,105 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, &http.Cookie{Name: "connectai_session", Value: "", Path: "/", HttpOnly: true, Secure: os.Getenv("APP_ENV") == "production", SameSite: http.SameSiteLaxMode, MaxAge: -1})
 	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	var total, month int64
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM ai_usage WHERE user_id=$1`, u.ID).Scan(&total)
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM ai_usage WHERE user_id=$1 AND created_at >= date_trunc('month', NOW())`, u.ID).Scan(&month)
+	s.render(w, "settings.html", PageData{Title: "Account settings", Active: "settings", User: u, CSRF: s.csrf(w, r), UsageTotal: total, UsageMonth: month, Success: r.URL.Query().Get("saved"), Name: map[string]string{"sent": "reset-sent", "unavailable": "reset-unavailable", "verify": "delete-verify"}[firstNonEmpty(r.URL.Query().Get("reset"), r.URL.Query().Get("delete"))]})
+}
+
+func (s *Server) updateProfile(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	if err := r.ParseForm(); err != nil || !s.validCSRF(r) {
+		http.Error(w, "Your form expired. Refresh and try again.", http.StatusBadRequest)
+		return
+	}
+	name := strings.TrimSpace(r.FormValue("name"))
+	email := strings.ToLower(strings.TrimSpace(r.FormValue("email")))
+	if email != strings.ToLower(u.Email) {
+		s.render(w, "settings.html", PageData{Title: "Account settings", Active: "settings", User: u, CSRF: s.csrf(w, r), Error: "Your registered email address cannot be changed."})
+		return
+	}
+	if len([]rune(name)) < 3 || len([]rune(name)) > 80 || !validEmail(email) {
+		s.render(w, "settings.html", PageData{Title: "Account settings", Active: "settings", User: u, CSRF: s.csrf(w, r), Error: "Enter a valid name and email address."})
+		return
+	}
+	if name == u.Name {
+		http.Redirect(w, r, "/settings?saved=unchanged", http.StatusSeeOther)
+		return
+	}
+	_, err := s.db.Exec(`UPDATE users SET name=$1 WHERE id=$2`, name, u.ID)
+	if err != nil {
+		s.render(w, "settings.html", PageData{Title: "Account settings", Active: "settings", User: u, CSRF: s.csrf(w, r), Error: "That email may already be in use. Please try another."})
+		return
+	}
+	http.Redirect(w, r, "/settings?saved=profile", http.StatusSeeOther)
+}
+
+func (s *Server) updatePassword(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	if err := r.ParseForm(); err != nil || !s.validCSRF(r) {
+		http.Error(w, "Your form expired. Refresh and try again.", http.StatusBadRequest)
+		return
+	}
+	current := r.FormValue("current_password")
+	newPassword := r.FormValue("new_password")
+	confirm := r.FormValue("confirm_password")
+	var hash string
+	if err := s.db.QueryRow(`SELECT password_hash FROM users WHERE id=$1`, u.ID).Scan(&hash); err != nil || !auth.VerifyPassword(current, hash) {
+		s.render(w, "settings.html", PageData{Title: "Account settings", Active: "settings", User: u, CSRF: s.csrf(w, r), Error: "Your current password is incorrect."})
+		return
+	}
+	if auth.ValidatePassword(newPassword) != nil || newPassword != confirm {
+		s.render(w, "settings.html", PageData{Title: "Account settings", Active: "settings", User: u, CSRF: s.csrf(w, r), Error: "New passwords must match and contain at least 8 characters, including a letter, number and symbol."})
+		return
+	}
+	if auth.VerifyPassword(newPassword, hash) {
+		http.Redirect(w, r, "/settings?saved=unchanged", http.StatusSeeOther)
+		return
+	}
+	newHash, err := auth.HashPassword(newPassword)
+	if err != nil {
+		http.Error(w, "Unable to update password.", http.StatusInternalServerError)
+		return
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		http.Error(w, "Unable to update password.", 500)
+		return
+	}
+	if _, err = tx.Exec(`UPDATE users SET password_hash=$1 WHERE id=$2`, newHash, u.ID); err == nil {
+		_, err = tx.Exec(`DELETE FROM sessions WHERE user_id=$1`, u.ID)
+	}
+	if err != nil {
+		_ = tx.Rollback()
+		http.Error(w, "Unable to update password.", 500)
+		return
+	}
+	if err = tx.Commit(); err != nil {
+		http.Error(w, "Unable to update password.", 500)
+		return
+	}
+	if err = s.createSession(w, u.ID); err != nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/settings?saved=password", http.StatusSeeOther)
 }
 
 type chatRequest struct {
@@ -321,6 +443,9 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, err = tx.Exec(`INSERT INTO ai_messages(user_id,module_slug,role,message) VALUES($1,$2,'user',$3),($1,$2,'model',$4)`, u.ID, module.Slug, prompt, answer)
+	if err == nil {
+		_, err = tx.Exec(`INSERT INTO ai_usage(user_id,module_slug,request_type,input_characters,output_characters) VALUES($1,$2,'chat',$3,$4)`, u.ID, module.Slug, len(prompt), len(answer))
+	}
 	if err != nil {
 		_ = tx.Rollback()
 		http.Error(w, "The response was generated but could not be saved.", http.StatusInternalServerError)
@@ -405,14 +530,14 @@ func (s *Server) analyzeUpload(w http.ResponseWriter, r *http.Request) {
 		pdfData = content
 	} else {
 		if ext == ".docx" || ext == ".xlsx" {
-    extractedText, extractErr := extractOfficeText(content, ext)
-    if extractErr != nil {
-        http.Error(w, "Unable to read this Office file: "+extractErr.Error(), http.StatusUnsupportedMediaType)
-        return
-    }
+			extractedText, extractErr := extractOfficeText(content, ext)
+			if extractErr != nil {
+				http.Error(w, "Unable to read this Office file: "+extractErr.Error(), http.StatusUnsupportedMediaType)
+				return
+			}
 
-    content = []byte(extractedText)
-} else {
+			content = []byte(extractedText)
+		} else {
 			if !utf8.Valid(content) || strings.ContainsRune(string(content), '\x00') {
 				http.Error(w, "This file must contain readable UTF-8 text.", http.StatusUnsupportedMediaType)
 				return
@@ -462,6 +587,9 @@ func (s *Server) analyzeUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	_, err = tx.Exec(`INSERT INTO ai_messages(user_id,module_slug,role,message) VALUES($1,$2,'user',$3),($1,$2,'model',$4)`,
 		u.ID, module.Slug, "Uploaded file: "+name+"\nRequest: "+question, answer)
+	if err == nil {
+		_, err = tx.Exec(`INSERT INTO ai_usage(user_id,module_slug,request_type,input_characters,output_characters) VALUES($1,$2,'file_analysis',$3,$4)`, u.ID, module.Slug, len(question)+len(name), len(answer))
+	}
 	if err != nil {
 		_ = tx.Rollback()
 		http.Error(w, "The analysis was generated but could not be saved.", http.StatusInternalServerError)
@@ -577,4 +705,172 @@ func safeAIError(err error) string {
 		return "Gemini is not configured. Add GEMINI_API_KEY to .env and restart ConnectAI Hub."
 	}
 	return "The AI service could not complete that request. Check your Gemini model and API configuration, then try again. Details: " + msg
+}
+
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
+}
+
+func validEmail(email string) bool {
+	if len(email) > 254 || strings.Count(email, "@") != 1 {
+		return false
+	}
+	parts := strings.SplitN(email, "@", 2)
+	return len(parts[0]) > 0 && strings.Contains(parts[1], ".") && !strings.ContainsAny(email, " \t\r\n")
+}
+
+func (s *Server) sendResetEmail(to, token string) error {
+	host, port, user, pass := os.Getenv("SMTP_HOST"), os.Getenv("SMTP_PORT"), os.Getenv("SMTP_USER"), os.Getenv("SMTP_PASSWORD")
+	if host == "" || port == "" || user == "" || pass == "" {
+		return fmt.Errorf("email delivery is not configured; set SMTP_HOST, SMTP_PORT, SMTP_USER and SMTP_PASSWORD")
+	}
+	from := os.Getenv("SMTP_FROM")
+	if from == "" {
+		from = user
+	}
+	base := strings.TrimRight(os.Getenv("APP_BASE_URL"), "/")
+	if base == "" {
+		base = "http://localhost:8080"
+	}
+	link := base + "/reset-password?token=" + token
+	body := "To reset your ConnectAI Hub password, open this link within 30 minutes:\r\n\r\n" + link + "\r\n\r\nIf you did not request this, ignore this email.\r\n"
+	msg := []byte("From: ConnectAI Hub <" + from + ">\r\nTo: " + to + "\r\nSubject: Reset your ConnectAI Hub password\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n" + body)
+	return smtp.SendMail(host+":"+port, smtp.PlainAuth("", user, pass, host), from, []string{to}, msg)
+}
+
+func (s *Server) createReset(w http.ResponseWriter, r *http.Request, userID int64, email string) error {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return err
+	}
+	token := base64.RawURLEncoding.EncodeToString(raw)
+	sum := sha256.Sum256([]byte(token))
+	hash := hex.EncodeToString(sum[:])
+	if _, err := s.db.Exec(`DELETE FROM password_resets WHERE user_id=$1`, userID); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`INSERT INTO password_resets(user_id,token_hash,expires_at) VALUES($1,$2,$3)`, userID, hash, time.Now().Add(30*time.Minute)); err != nil {
+		return err
+	}
+	if err := s.sendResetEmail(email, token); err != nil {
+		_, _ = s.db.Exec(`DELETE FROM password_resets WHERE token_hash=$1`, hash)
+		return err
+	}
+	return nil
+}
+
+func (s *Server) requestPasswordReset(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	if err := r.ParseForm(); err != nil || !s.validCSRF(r) {
+		http.Error(w, "Your form expired. Refresh and try again.", 400)
+		return
+	}
+	if err := s.createReset(w, r, u.ID, u.Email); err != nil {
+		http.Redirect(w, r, "/settings?reset=unavailable", http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/settings?reset=sent", http.StatusSeeOther)
+}
+
+func (s *Server) forgotPasswordPage(w http.ResponseWriter, r *http.Request) {
+	s.render(w, "forgot-password.html", PageData{Title: "Forgot password", CSRF: s.csrf(w, r), Success: r.URL.Query().Get("sent")})
+}
+func (s *Server) forgotPassword(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil || !s.validCSRF(r) {
+		http.Error(w, "Your form expired. Refresh and try again.", 400)
+		return
+	}
+	email := strings.ToLower(strings.TrimSpace(r.FormValue("email")))
+	if !validEmail(email) {
+		s.render(w, "forgot-password.html", PageData{Title: "Forgot password", CSRF: s.csrf(w, r), Error: "Enter a valid email address."})
+		return
+	}
+	var id int64
+	var stored string
+	if err := s.db.QueryRow(`SELECT id,email FROM users WHERE email=$1`, email).Scan(&id, &stored); err == nil {
+		if err := s.createReset(w, r, id, stored); err != nil {
+			s.render(w, "forgot-password.html", PageData{Title: "Forgot password", CSRF: s.csrf(w, r), Error: "We could not send the verification email. Please try again later."})
+			return
+		}
+	}
+	http.Redirect(w, r, "/forgot-password?sent=1", http.StatusSeeOther)
+}
+func (s *Server) resetPasswordPage(w http.ResponseWriter, r *http.Request) {
+	s.render(w, "reset-password.html", PageData{Title: "Reset password", CSRF: s.csrf(w, r), Name: r.URL.Query().Get("token")})
+}
+func (s *Server) resetPassword(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil || !s.validCSRF(r) {
+		http.Error(w, "Your form expired. Refresh and try again.", 400)
+		return
+	}
+	token := r.FormValue("token")
+	password := r.FormValue("password")
+	confirm := r.FormValue("confirm_password")
+	if token == "" || auth.ValidatePassword(password) != nil || password != confirm {
+		s.render(w, "reset-password.html", PageData{Title: "Reset password", CSRF: s.csrf(w, r), Name: token, Error: "Use a matching password with at least 8 characters, including a letter, number and symbol."})
+		return
+	}
+	sum := sha256.Sum256([]byte(token))
+	tokenHash := hex.EncodeToString(sum[:])
+	var userID int64
+	err := s.db.QueryRow(`SELECT user_id FROM password_resets WHERE token_hash=$1 AND expires_at>NOW() AND used_at IS NULL`, tokenHash).Scan(&userID)
+	if err != nil {
+		s.render(w, "reset-password.html", PageData{Title: "Reset password", CSRF: s.csrf(w, r), Error: "This verification link is invalid or has expired. Request a new one."})
+		return
+	}
+	hash, err := auth.HashPassword(password)
+	if err != nil {
+		http.Error(w, "Unable to reset password", 500)
+		return
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		http.Error(w, "Unable to reset password", 500)
+		return
+	}
+	if _, err = tx.Exec(`UPDATE users SET password_hash=$1 WHERE id=$2`, hash, userID); err == nil {
+		_, err = tx.Exec(`DELETE FROM sessions WHERE user_id=$1`, userID)
+	}
+	if err == nil {
+		_, err = tx.Exec(`UPDATE password_resets SET used_at=NOW() WHERE token_hash=$1`, tokenHash)
+	}
+	if err != nil {
+		_ = tx.Rollback()
+		http.Error(w, "Unable to reset password", 500)
+		return
+	}
+	if err = tx.Commit(); err != nil {
+		http.Error(w, "Unable to reset password", 500)
+		return
+	}
+	http.Redirect(w, r, "/login?reset=1", http.StatusSeeOther)
+}
+func (s *Server) deleteAccount(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	if err := r.ParseForm(); err != nil || !s.validCSRF(r) {
+		http.Error(w, "Your form expired. Refresh and try again.", 400)
+		return
+	}
+	var hash string
+	if err := s.db.QueryRow(`SELECT password_hash FROM users WHERE id=$1`, u.ID).Scan(&hash); err != nil || !auth.VerifyPassword(r.FormValue("password"), hash) {
+		http.Redirect(w, r, "/settings?delete=verify", http.StatusSeeOther)
+		return
+	}
+	if _, err := s.db.Exec(`DELETE FROM users WHERE id=$1`, u.ID); err != nil {
+		http.Error(w, "Unable to delete account", 500)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: "connectai_session", Value: "", Path: "/", HttpOnly: true, Secure: os.Getenv("APP_ENV") == "production", SameSite: http.SameSiteLaxMode, MaxAge: -1})
+	http.Redirect(w, r, "/", http.StatusSeeOther)
 }

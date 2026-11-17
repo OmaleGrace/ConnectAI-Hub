@@ -123,3 +123,45 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 });
+
+
+// Authentication helpers: password visibility and live input feedback.
+document.addEventListener('click', (event) => {
+  const button = event.target.closest('.toggle-password');
+  if (!button) return;
+  const input = button.parentElement.querySelector('input');
+  if (!input) return;
+  const showing = input.type === 'password';
+  input.type = showing ? 'text' : 'password';
+  button.textContent = showing ? 'Hide' : 'Show';
+  button.setAttribute('aria-label', showing ? 'Hide password' : 'Show password');
+});
+
+document.querySelectorAll('[data-live-form]').forEach((form) => {
+  const email = form.querySelector('[data-email-check]');
+  const emailFeedback = form.querySelector('[data-email-feedback]');
+  if (email && emailFeedback) {
+    const checkEmail = () => {
+      if (!email.value) { emailFeedback.textContent = ''; emailFeedback.className = 'live-feedback'; return; }
+      const valid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.value);
+      emailFeedback.textContent = valid ? 'Email format looks valid.' : 'Enter a valid email address.';
+      emailFeedback.className = 'live-feedback ' + (valid ? 'valid' : 'invalid');
+    };
+    email.addEventListener('input', checkEmail); checkEmail();
+  }
+  const name = form.querySelector('[data-name-check]');
+  const nameFeedback = form.querySelector('[data-name-feedback]');
+  if (name && nameFeedback) name.addEventListener('input', () => {
+    const ok = [...name.value.trim()].length >= 3;
+    nameFeedback.textContent = ok ? 'Name length looks good.' : 'Enter at least 3 characters.';
+    nameFeedback.className = 'live-feedback ' + (ok ? 'valid' : 'invalid');
+  });
+  const password = form.querySelector('input[name="password"], input[name="new_password"]');
+  const feedback = form.querySelector('[data-password-feedback]');
+  if (password && feedback) password.addEventListener('input', () => {
+    const value = password.value;
+    const checks = [value.length >= 8, /[A-Za-z]/.test(value), /[0-9]/.test(value), /[^A-Za-z0-9]/.test(value)];
+    feedback.textContent = checks.map((ok, i) => (ok ? '✓ ' : '• ') + ['8+ characters', 'a letter', 'a number', 'a symbol'][i]).join('  ');
+    feedback.className = 'live-feedback password-rules ' + (checks.every(Boolean) ? 'valid' : 'invalid');
+  });
+});
