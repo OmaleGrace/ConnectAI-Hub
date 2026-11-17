@@ -44,6 +44,9 @@ type PageData struct {
 	UserPlan                                  string
 	PlusPriceNaira                            int64
 	PlusExpiresAt                             time.Time
+	UnreadNotifications                       int64
+	Phone                                     string
+	PhoneVerified                             bool
 	AdminUsers, AdminRequests, DailyLimit     int64
 	AdminUserList                             []AdminUserInfo
 	AdminUserDetail                           *AdminUserInfo
@@ -52,9 +55,16 @@ type PageData struct {
 	ModuleUsage                               []ModuleUsage
 	Sessions                                  []SessionInfo
 	Modules                                   []Module
+	Notifications                             []NotificationItem
 	Module                                    Module
 	QuickPrompts                              []string
 	User                                      *User
+}
+type NotificationItem struct {
+	ID             int64
+	Title, Message string
+	Read           bool
+	CreatedAt      time.Time
 }
 type ModuleUsage struct {
 	Name  string
@@ -162,6 +172,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /billing/plus", s.startPlusPayment)
 	s.mux.HandleFunc("GET /billing/callback", s.finishPlusPayment)
 	s.mux.HandleFunc("GET /settings", s.settingsPage)
+	s.mux.HandleFunc("POST /settings/phone", s.updatePhone)
+	s.mux.HandleFunc("POST /settings/phone/verify", s.verifyPhoneEmailCode)
+	s.mux.HandleFunc("GET /notifications", s.notificationsPage)
+	s.mux.HandleFunc("POST /notifications/{id}/read", s.markNotificationRead)
 	s.mux.HandleFunc("GET /settings/sessions", s.sessionsPage)
 	s.mux.HandleFunc("POST /settings/sessions/revoke", s.revokeSessions)
 	s.mux.HandleFunc("GET /admin", s.adminDashboard)
@@ -254,10 +268,12 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM ai_usage WHERE user_id=$1 AND created_at >= date_trunc('month', NOW())`, u.ID).Scan(&month)
 	plan, limit, used := s.userUsage(u.ID)
 	remaining := limit - used
+	var unread int64
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM notifications WHERE user_id=$1 AND is_read=FALSE`, u.ID).Scan(&unread)
 	if remaining < 0 {
 		remaining = 0
 	}
-	s.render(w, "dashboard.html", PageData{Title: "Your workspace", Modules: s.modules, Active: "dashboard", User: u, CSRF: s.csrf(w, r), UsageTotal: total, UsageMonth: month, UserPlan: plan, UserDailyLimit: limit, DailyUsed: used, DailyRemaining: remaining, PlusPriceNaira: paystackPlusPriceNaira(), Name: map[string]string{"success": "success", "active": "active", "unverified": "unverified"}[r.URL.Query().Get("billing")]})
+	s.render(w, "dashboard.html", PageData{Title: "Your workspace", Modules: s.modules, Active: "dashboard", User: u, CSRF: s.csrf(w, r), UsageTotal: total, UsageMonth: month, UserPlan: plan, UserDailyLimit: limit, DailyUsed: used, DailyRemaining: remaining, PlusPriceNaira: paystackPlusPriceNaira(), UnreadNotifications: unread, Name: map[string]string{"success": "success", "active": "active", "unverified": "unverified"}[r.URL.Query().Get("billing")]})
 }
 func (s *Server) module(w http.ResponseWriter, r *http.Request) {
 	u := s.currentUser(r)
@@ -395,7 +411,12 @@ func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request) {
 	var total, month int64
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM ai_usage WHERE user_id=$1`, u.ID).Scan(&total)
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM ai_usage WHERE user_id=$1 AND created_at >= date_trunc('month', NOW())`, u.ID).Scan(&month)
-	s.render(w, "settings.html", PageData{Title: "Account settings", Active: "settings", User: u, CSRF: s.csrf(w, r), UsageTotal: total, UsageMonth: month, Success: r.URL.Query().Get("saved"), Name: map[string]string{"sent": "reset-sent", "unavailable": "reset-unavailable", "verify": "delete-verify"}[firstNonEmpty(r.URL.Query().Get("reset"), r.URL.Query().Get("delete"))]})
+	var phone sql.NullString
+	var phoneVerified bool
+	_ = s.db.QueryRow(`SELECT phone,COALESCE(phone_verified,FALSE) FROM users WHERE id=$1`, u.ID).Scan(&phone, &phoneVerified)
+	var unread int64
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM notifications WHERE user_id=$1 AND is_read=FALSE`, u.ID).Scan(&unread)
+	s.render(w, "settings.html", PageData{Title: "Account settings", Active: "settings", User: u, CSRF: s.csrf(w, r), UsageTotal: total, UsageMonth: month, Success: r.URL.Query().Get("saved"), Name: map[string]string{"sent": "reset-sent", "unavailable": "reset-unavailable", "verify": "delete-verify", "phone-sent": "phone-sent", "phone-ok": "phone-ok", "phone-failed": "phone-failed"}[firstNonEmpty(r.URL.Query().Get("reset"), firstNonEmpty(r.URL.Query().Get("delete"), r.URL.Query().Get("phone")))], Phone: phone.String, PhoneVerified: phoneVerified, UnreadNotifications: unread})
 }
 
 func (s *Server) updateProfile(w http.ResponseWriter, r *http.Request) {
@@ -624,22 +645,18 @@ func (s *Server) finishPlusPayment(w http.ResponseWriter, r *http.Request) {
 		reference = strings.TrimSpace(r.URL.Query().Get("trxref"))
 	}
 	if reference == "" || len(reference) > 100 {
-		http.Redirect(w, r, "/dashboard?billing=unverified", http.StatusSeeOther)
+		s.render(w, "billing-result.html", PageData{Title: "Payment result", Name: "failed", Success: "We could not confirm this payment. No Plus access was added. If you were charged, contact support with your Paystack receipt.", User: s.currentUser(r), CSRF: s.csrf(w, r)})
 		return
 	}
 	var amount int64
 	var status string
 	var owner int64
 	if err := s.db.QueryRow(`SELECT user_id,amount,status FROM plan_payments WHERE reference=$1`, reference).Scan(&owner, &amount, &status); err != nil {
-		http.Redirect(w, r, "/login?billing=unverified", http.StatusSeeOther)
+		s.render(w, "billing-result.html", PageData{Title: "Payment result", Name: "failed", Success: "We could not find this payment reference. If you were charged, contact support with your Paystack receipt.", User: s.currentUser(r), CSRF: s.csrf(w, r)})
 		return
 	}
 	if status == "paid" {
-		if s.currentUser(r) != nil {
-			http.Redirect(w, r, "/dashboard?billing=active", http.StatusSeeOther)
-		} else {
-			http.Redirect(w, r, "/login?billing=active", http.StatusSeeOther)
-		}
+		s.render(w, "billing-result.html", PageData{Title: "Payment result", Name: "success", Success: "This payment has already been verified. Your ConnectAI Plus access is active.", User: s.currentUser(r), CSRF: s.csrf(w, r)})
 		return
 	}
 	secret := strings.TrimSpace(os.Getenv("PAYSTACK_SECRET_KEY"))
@@ -663,7 +680,7 @@ func (s *Server) finishPlusPayment(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 	var verified paystackVerifyResponse
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 || json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&verified) != nil || !verified.Status || verified.Data.Status != "success" || verified.Data.Reference != reference || verified.Data.Amount != amount || verified.Data.Currency != "NGN" {
-		http.Redirect(w, r, "/dashboard?billing=unverified", http.StatusSeeOther)
+		s.render(w, "billing-result.html", PageData{Title: "Payment result", Name: "failed", Success: "We could not confirm this payment. No Plus access was added. If you were charged, contact support with your Paystack receipt.", User: s.currentUser(r), CSRF: s.csrf(w, r)})
 		return
 	}
 	tx, err := s.db.BeginTx(r.Context(), nil)
@@ -689,11 +706,160 @@ func (s *Server) finishPlusPayment(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Unable to complete plan activation.", 500)
 		return
 	}
-	if s.currentUser(r) != nil {
-		http.Redirect(w, r, "/dashboard?billing=success", http.StatusSeeOther)
-	} else {
-		http.Redirect(w, r, "/login?billing=success", http.StatusSeeOther)
+	var email, name string
+	_ = s.db.QueryRow(`SELECT email,name FROM users WHERE id=$1`, owner).Scan(&email, &name)
+	if changed == 1 {
+		_, _ = s.db.Exec(`INSERT INTO notifications(user_id,title,message,kind) VALUES($1,$2,$3,'billing')`, owner, "Payment successful", "Your ConnectAI Plus payment was verified. Plus access is now active for 30 days.")
+		if err := s.sendPaymentSuccessEmail(name, email, reference, amount/100); err != nil {
+			log.Printf("connectai: payment confirmation email could not be sent to %s: %v", email, err)
+		}
 	}
+	s.render(w, "billing-result.html", PageData{Title: "Payment result", Name: "success", Success: "Your payment was verified successfully. ConnectAI Plus is active for 30 days. Check your registered email for the payment confirmation.", User: s.currentUser(r), CSRF: s.csrf(w, r)})
+}
+
+func (s *Server) sendPaymentSuccessEmail(name, to, reference string, amount int64) error {
+	host, port, user, pass := os.Getenv("SMTP_HOST"), os.Getenv("SMTP_PORT"), os.Getenv("SMTP_USER"), os.Getenv("SMTP_PASSWORD")
+	if host == "" || port == "" || user == "" || pass == "" {
+		return fmt.Errorf("email delivery is not configured")
+	}
+	from := os.Getenv("SMTP_FROM")
+	if from == "" {
+		from = user
+	}
+	safeName := strings.NewReplacer("\r", " ", "\n", " ").Replace(name)
+	body := fmt.Sprintf("Hello %s,\r\n\r\nYour ConnectAI Plus payment was successful.\r\n\r\nAmount: NGN %d\r\nReference: %s\r\nPlan: ConnectAI Plus (30 days)\r\n\r\nYour Plus access is now active. You can sign in to your workspace to continue.\r\n\r\nThe ConnectAI Hub Team\r\n", safeName, amount, reference)
+	msg := []byte("From: ConnectAI Hub <" + from + ">\r\nTo: " + to + "\r\nSubject: ConnectAI Plus payment successful\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n" + body)
+	return smtp.SendMail(host+":"+port, smtp.PlainAuth("", user, pass, host), from, []string{to}, msg)
+}
+
+func (s *Server) notificationsPage(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	rows, err := s.db.Query(`SELECT id,title,message,is_read,created_at FROM notifications WHERE user_id=$1 ORDER BY created_at DESC LIMIT 100`, u.ID)
+	if err != nil {
+		http.Error(w, "Unable to load notifications.", 500)
+		return
+	}
+	defer rows.Close()
+	items := []NotificationItem{}
+	var unread int64
+	for rows.Next() {
+		var x NotificationItem
+		if rows.Scan(&x.ID, &x.Title, &x.Message, &x.Read, &x.CreatedAt) == nil {
+			items = append(items, x)
+			if !x.Read {
+				unread++
+			}
+		}
+	}
+	s.render(w, "notifications.html", PageData{Title: "Notifications", Active: "notifications", User: u, CSRF: s.csrf(w, r), Notifications: items, UnreadNotifications: unread})
+}
+func (s *Server) markNotificationRead(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	if err := r.ParseForm(); err != nil || !s.validCSRF(r) {
+		http.Error(w, "Your form expired. Refresh and try again.", 400)
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	_, _ = s.db.Exec(`UPDATE notifications SET is_read=TRUE WHERE id=$1 AND user_id=$2`, id, u.ID)
+	http.Redirect(w, r, "/notifications", http.StatusSeeOther)
+}
+func (s *Server) updatePhone(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	if err := r.ParseForm(); err != nil || !s.validCSRF(r) {
+		http.Error(w, "Your form expired. Refresh and try again.", 400)
+		return
+	}
+	phone := strings.TrimSpace(r.FormValue("phone"))
+	if len(phone) > 32 || (phone != "" && len(phone) < 7) {
+		http.Redirect(w, r, "/settings?phone=failed", http.StatusSeeOther)
+		return
+	}
+	_, err := s.db.Exec(`UPDATE users SET phone=$1,phone_verified=FALSE WHERE id=$2`, nullIfEmpty(phone), u.ID)
+	if err != nil {
+		http.Redirect(w, r, "/settings?phone=failed", http.StatusSeeOther)
+		return
+	}
+	if phone == "" {
+		http.Redirect(w, r, "/settings?saved=profile", http.StatusSeeOther)
+		return
+	}
+	// Verification code is sent to the account email, never to the phone number.
+	var raw [4]byte
+	if _, err = rand.Read(raw[:]); err != nil {
+		http.Redirect(w, r, "/settings?phone=failed", http.StatusSeeOther)
+		return
+	}
+	code := fmt.Sprintf("%06d", (int(raw[0])<<16|int(raw[1])<<8|int(raw[2]))%1000000)
+	sum := sha256.Sum256([]byte(code))
+	hash := hex.EncodeToString(sum[:])
+	_, _ = s.db.Exec(`DELETE FROM phone_verification_codes WHERE user_id=$1`, u.ID)
+	if _, err = s.db.Exec(`INSERT INTO phone_verification_codes(user_id,code_hash,expires_at) VALUES($1,$2,NOW()+INTERVAL '10 minutes')`, u.ID, hash); err != nil {
+		http.Redirect(w, r, "/settings?phone=failed", http.StatusSeeOther)
+		return
+	}
+	if err = s.sendPhoneVerificationEmail(u.Email, code); err != nil {
+		_, _ = s.db.Exec(`DELETE FROM phone_verification_codes WHERE user_id=$1`, u.ID)
+		log.Printf("connectai: phone verification email failed for user %d: %v", u.ID, err)
+		http.Redirect(w, r, "/settings?phone=failed", http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/settings?phone=sent", http.StatusSeeOther)
+}
+func (s *Server) sendPhoneVerificationEmail(to, code string) error {
+	host, port, user, pass := os.Getenv("SMTP_HOST"), os.Getenv("SMTP_PORT"), os.Getenv("SMTP_USER"), os.Getenv("SMTP_PASSWORD")
+	if host == "" || port == "" || user == "" || pass == "" {
+		return fmt.Errorf("email delivery is not configured")
+	}
+	from := os.Getenv("SMTP_FROM")
+	if from == "" {
+		from = user
+	}
+	body := "Use this verification code to confirm the phone number saved in your ConnectAI Hub account: " + code + "\r\n\r\nThe code expires in 10 minutes. It was sent to your account email; ConnectAI Hub will not send an SMS.\r\n"
+	msg := []byte("From: ConnectAI Hub <" + from + ">\r\nTo: " + to + "\r\nSubject: Verify your phone number on ConnectAI Hub\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n" + body)
+	return smtp.SendMail(host+":"+port, smtp.PlainAuth("", user, pass, host), from, []string{to}, msg)
+}
+func (s *Server) verifyPhoneEmailCode(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	if err := r.ParseForm(); err != nil || !s.validCSRF(r) {
+		http.Error(w, "Your form expired. Refresh and try again.", 400)
+		return
+	}
+	code := strings.TrimSpace(r.FormValue("code"))
+	sum := sha256.Sum256([]byte(code))
+	hash := hex.EncodeToString(sum[:])
+	res, err := s.db.Exec(`UPDATE users SET phone_verified=TRUE WHERE id=$1 AND phone IS NOT NULL AND EXISTS(SELECT 1 FROM phone_verification_codes WHERE user_id=$1 AND code_hash=$2 AND expires_at>NOW())`, u.ID, hash)
+	if err != nil {
+		http.Redirect(w, r, "/settings?phone=failed", http.StatusSeeOther)
+		return
+	}
+	n, _ := res.RowsAffected()
+	if n != 1 {
+		http.Redirect(w, r, "/settings?phone=failed", http.StatusSeeOther)
+		return
+	}
+	_, _ = s.db.Exec(`DELETE FROM phone_verification_codes WHERE user_id=$1`, u.ID)
+	_, _ = s.db.Exec(`INSERT INTO notifications(user_id,title,message,kind) VALUES($1,'Phone number verified','Your phone number was verified using your account email.','security')`, u.ID)
+	http.Redirect(w, r, "/settings?phone=ok", http.StatusSeeOther)
 }
 
 func (s *Server) userUsage(userID int64) (string, int64, int64) {

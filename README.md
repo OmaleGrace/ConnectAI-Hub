@@ -324,3 +324,7 @@ A successful verified payment activates Plus for 30 days with a 10,000-request d
 ## Dashboard onboarding
 
 The dashboard tool search filters the seven module cards as you type. A first-visit guided tour appears once per browser; users can replay it using **Take a tour** in the navigation or from Account settings.
+
+
+### Batch 16 database migration
+Run `migrations/009_phone_email_verification.sql` against the production database before using email-based phone verification. The app uses the existing SMTP settings to send phone verification codes to the account email; it does not send SMS.
