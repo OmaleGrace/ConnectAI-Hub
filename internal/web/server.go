@@ -219,7 +219,21 @@ func (s *Server) csrf(w http.ResponseWriter, r *http.Request) string {
 		return ""
 	}
 	token := base64.RawURLEncoding.EncodeToString(b)
-	http.SetCookie(w, &http.Cookie{Name: "connectai_csrf", Value: token, Path: "/", SameSite: http.SameSiteLaxMode, Secure: os.Getenv("APP_ENV") == "production", MaxAge: 3600})
+
+	// Render terminates HTTPS before forwarding requests to the Go process,
+	// so r.TLS may be nil in production. Use the proxy's protocol header there.
+	// For local http://localhost development, leave Secure false so the browser
+	// actually sends the CSRF cookie with POST requests.
+	secureCookie := r.TLS != nil || strings.EqualFold(strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]), "https")
+	http.SetCookie(w, &http.Cookie{
+		Name:     "connectai_csrf",
+		Value:    token,
+		Path:     "/",
+		SameSite: http.SameSiteLaxMode,
+		HttpOnly: true,
+		Secure:   secureCookie,
+		MaxAge:   24 * 60 * 60,
+	})
 	return token
 }
 func (s *Server) validCSRF(r *http.Request) bool {
