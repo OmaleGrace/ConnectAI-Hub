@@ -125,6 +125,49 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 
+
+
+// Device-local appearance preference. "system" follows the OS/browser preference.
+(() => {
+  const root = document.documentElement;
+  const key = "connectai-theme";
+  const select = document.getElementById("themePreference");
+  let saved = "system";
+  try { saved = localStorage.getItem(key) || "system"; } catch (_) {}
+  root.dataset.theme = saved;
+  if (select) {
+    select.value = saved;
+    select.addEventListener("change", () => {
+      const value = ["light", "dark", "system"].includes(select.value) ? select.value : "system";
+      root.dataset.theme = value;
+      try { localStorage.setItem(key, value); } catch (_) {}
+    });
+  }
+})();
+
+// Progressive Web App installation (Chrome / Edge / supported Android browsers).
+let connectAIInstallPrompt = null;
+window.addEventListener("beforeinstallprompt", (event) => {
+  event.preventDefault();
+  connectAIInstallPrompt = event;
+  document.querySelectorAll("[data-install-app]").forEach((button) => { button.hidden = false; });
+});
+document.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-install-app]");
+  if (!button) return;
+  if (!connectAIInstallPrompt) {
+    alert("To install ConnectAI Hub, open this website in Chrome, tap ⋮, then choose Install app or Add to Home screen.");
+    return;
+  }
+  connectAIInstallPrompt.prompt();
+  await connectAIInstallPrompt.userChoice;
+  connectAIInstallPrompt = null;
+  document.querySelectorAll("[data-install-app]").forEach((item) => { item.hidden = true; });
+});
+if ("serviceWorker" in navigator && location.protocol === "https:") {
+  window.addEventListener("load", () => navigator.serviceWorker.register("/service-worker.js").catch(() => {}));
+}
+
 // Authentication helpers: password visibility and live input feedback.
 document.addEventListener('click', (event) => {
   const button = event.target.closest('.toggle-password');

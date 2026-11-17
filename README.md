@@ -249,3 +249,9 @@ GitHub: [@OmaleGrace](https://github.com/OmaleGrace)
 ---
 
 ⭐ If you find this project interesting, consider giving the repository a star!
+
+## Appearance and installable app (Batch 10)
+
+- Users can select Dark, Light, or Follow system in Account settings. The preference is stored locally in their browser/device.
+- The app includes a web app manifest, icons, and a service worker for static asset caching. On supported browsers (including Chrome on Android), users can install ConnectAI Hub from the browser menu or the in-app Install app button.
+- Serve the app over HTTPS for installation; Render's HTTPS domain is suitable. The PWA install flow creates an app-like installation on the device. It does not produce a standalone downloadable `.apk` file. A signed Android APK requires a Trusted Web Activity/Android build and signing process.

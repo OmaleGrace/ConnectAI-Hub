@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"log"
 	"net/http"
 	"net/smtp"
 	"os"
@@ -68,6 +69,11 @@ func New(db *sql.DB) (*Server, error) {
 func (s *Server) Handler() http.Handler { return s.mux }
 func (s *Server) routes() {
 	s.mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("./static"))))
+	s.mux.HandleFunc("GET /service-worker.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		w.Header().Set("Service-Worker-Allowed", "/")
+		http.ServeFile(w, r, "./static/service-worker.js")
+	})
 	s.mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte("ok"))
@@ -214,6 +220,11 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 	if err = s.createSession(w, id); err != nil {
 		http.Error(w, "Account created, but sign-in failed. Please log in.", 500)
 		return
+	}
+	// Account creation is already complete. A temporary email delivery issue
+	// must not prevent the new user from accessing their account.
+	if err := s.sendWelcomeEmail(name, email); err != nil {
+		log.Printf("connectai: welcome email could not be sent to %s: %v", email, err)
 	}
 	http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 }
@@ -720,6 +731,22 @@ func validEmail(email string) bool {
 	}
 	parts := strings.SplitN(email, "@", 2)
 	return len(parts[0]) > 0 && strings.Contains(parts[1], ".") && !strings.ContainsAny(email, " \t\r\n")
+}
+
+func (s *Server) sendWelcomeEmail(name, to string) error {
+	host, port, user, pass := os.Getenv("SMTP_HOST"), os.Getenv("SMTP_PORT"), os.Getenv("SMTP_USER"), os.Getenv("SMTP_PASSWORD")
+	if host == "" || port == "" || user == "" || pass == "" {
+		return fmt.Errorf("email delivery is not configured; set SMTP_HOST, SMTP_PORT, SMTP_USER and SMTP_PASSWORD")
+	}
+	from := os.Getenv("SMTP_FROM")
+	if from == "" {
+		from = user
+	}
+	// Keep user-provided text out of mail headers; the name is only in the body.
+	safeName := strings.NewReplacer("\r", " ", "\n", " ").Replace(name)
+	body := "Hello " + safeName + ",\r\n\r\nWelcome to ConnectAI Hub! Your account has been created successfully.\r\n\r\nYou can now sign in and explore Study AI, Career AI, Business AI, Document AI, Website AI, Support AI and Data AI.\r\n\r\nIf you did not create this account, please contact the ConnectAI Hub team.\r\n\r\nThe ConnectAI Hub Team\r\n"
+	msg := []byte("From: ConnectAI Hub <" + from + ">\r\nTo: " + to + "\r\nSubject: Welcome to ConnectAI Hub\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n" + body)
+	return smtp.SendMail(host+":"+port, smtp.PlainAuth("", user, pass, host), from, []string{to}, msg)
 }
 
 func (s *Server) sendResetEmail(to, token string) error {
