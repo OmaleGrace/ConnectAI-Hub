@@ -230,6 +230,13 @@ The application connects to the configured PostgreSQL database and manages its r
 
 The application creates the `ai_usage` table automatically during database startup. The matching SQL migration is also available at `migrations/002_ai_usage.sql`.
 
+## 🔐 Personal Data Controls (Batch 18)
+
+- Users can download a JSON export of their own profile, AI conversations, usage activity and payment history.
+- Exports exclude password hashes, session tokens and phone-verification secrets.
+- Users can permanently delete their own saved AI conversations and usage activity after confirming their password.
+- Deleting AI history does not delete the account, subscription, payment history or notifications.
+
 ## 🚧 Future Improvements
 
 Potential areas for future development include:
@@ -328,3 +335,67 @@ The dashboard tool search filters the seven module cards as you type. A first-vi
 
 ### Batch 16 database migration
 Run `migrations/009_phone_email_verification.sql` against the production database before using email-based phone verification. The app uses the existing SMTP settings to send phone verification codes to the account email; it does not send SMS.
+
+
+## Batch 17 additions
+- Admin billing overview with verified revenue, paid transaction count, active Plus accounts, and recent payment records. Revenue is displayed in kobo (the stored Paystack NGN minor unit).
+- User billing page with current plan, Plus expiry, and recent transaction history.
+- Notification preference for non-essential email updates and a mark-all-as-read action. Essential receipts and security emails remain transactional.
+- Existing session management remains available under Account → Manage active sessions.
+- `notification_preferences` is created automatically during startup migration and is also supplied as migration 010.
+
+
+## Batch 19 — Prompt Library
+
+Users can save up to 100 reusable prompts, assign each prompt to one of the seven AI workspaces, launch a saved prompt directly in that workspace, and delete prompts they no longer need. Prompts are private to their owner and are deleted automatically when the account is deleted. The `saved_prompts` table is created by the existing startup migration. No new environment variables are required.
+
+
+## Batch 20 — Chat productivity
+
+- Search within the currently open workspace conversation.
+- Safe basic Markdown formatting for assistant responses (paragraphs, emphasis, inline code and fenced code blocks).
+- Copy individual assistant responses.
+- Regenerate the latest assistant response; this counts toward the daily AI allowance.
+- Export the current conversation as Markdown.
+
+No new environment variables or database migrations are required.
+
+## Batch 21 — Gemini reliability and terminal diagnostics
+
+- Retries temporary Gemini API failures (HTTP 408, 429 and 5xx) up to two times after the initial attempt, using exponential backoff and jitter.
+- If the configured primary model still returns a temporary service/rate-limit failure, tries a fallback model.
+- Default fallback model: `gemini-3.5-flash-lite`. Override it with `GEMINI_FALLBACK_MODEL`.
+- Writes model selection, retry attempts, retry delays, success/failure and elapsed time to the Go terminal logs. API keys and user prompts are not logged.
+- Applies the same retry/fallback handling to normal chat and PDF-based AI requests.
+
+Optional Render/local environment variable:
+
+```env
+GEMINI_FALLBACK_MODEL=gemini-3.5-flash-lite
+```
+
+No database migration or new dependency is required. The existing `GEMINI_MODEL` setting remains the primary model.
+
+
+## Batch 22 — Workspace personalization and AI quality
+
+- Save workspace-specific custom instructions, creativity setting and pin preference.
+- Rate assistant responses and optionally provide feedback. Feedback is private to the user and visible in aggregate to administrators.
+- Preserve prior assistant answers when regenerating, so the previous answer is retained for future version-history UI.
+- Record operational model events (primary success, retries, fallback start/success and failures) without storing prompts or generated content.
+- Admin dashboard shows 30-day model event counts and aggregate response ratings.
+
+The app's existing architecture stores one ongoing conversation per module. This batch does not introduce multi-thread conversation folders; that requires a separate conversation-ID migration and data-preserving chat API refactor.
+
+
+## Batch 23 — AI Website Builder
+
+Users can describe a website in natural language and generate a saved project containing HTML, CSS and vanilla JavaScript. Each project has a sandboxed live preview and can be downloaded as a ZIP containing `index.html`, `style.css`, `script.js` and a README.
+
+- New routes: `/builder`, `/builder/generate`, `/builder/projects/{id}`, project download and deletion.
+- Projects are private to the owning account.
+- Limits: 8,000-character prompt, 30 saved projects per account, three generations per ten minutes.
+- Website generation counts toward the user's daily AI allowance.
+- The preview is sandboxed and does not grant same-origin access.
+- Generated projects are not automatically hosted or published; users must review and deploy them separately.
+- No new environment variables are required. The `website_projects` table and usage constraint update are applied at startup.

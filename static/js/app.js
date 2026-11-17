@@ -31,24 +31,30 @@ document.addEventListener("DOMContentLoaded", () => {
     const slug=form.dataset.module, csrf=form.dataset.csrf;
     const box=document.getElementById("chatMessages"), input=document.getElementById("chatInput");
     const button=document.getElementById("sendButton"), errorBox=document.getElementById("chatError");
+    if(input.dataset.initialPrompt){input.value=input.dataset.initialPrompt;input.focus();}
     const empty=document.getElementById("chatEmpty");
-    const addMessage=(role,text,pending=false)=>{
+    const escapeHTML=value=>value.replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
+    const formatAnswer=value=>{let safe=escapeHTML(value);safe=safe.replace(/```([\w-]*)\n([\s\S]*?)```/g,(_,lang,code)=>`<pre><code>${code.replace(/\n$/,'')}</code></pre>`);safe=safe.replace(/`([^`\n]+)`/g,"<code>$1</code>").replace(/\*\*([^*\n]+)\*\*/g,"<strong>$1</strong>").replace(/\*([^*\n]+)\*/g,"<em>$1</em>");return safe.split(/\n{2,}/).map(part=>part.startsWith("<pre>")?part:`<p>${part.replace(/\n/g,"<br>")}</p>`).join("");};
+    const regenerateButton=document.getElementById("regenerateLast");
+    const refreshRegenerate=()=>{if(regenerateButton)regenerateButton.disabled=!box.querySelector(".chat-bubble.user");};
+    const addMessage=(role,text,pending=false,messageId=0)=>{
       if(empty) empty.remove();
-      const bubble=document.createElement("div");
-      bubble.className="chat-bubble "+role+(pending?" pending":"");
-      const label=document.createElement("small");
-      label.textContent=role==="user"?"You":"ConnectAI assistant";
-      const body=document.createElement("div");
-      body.textContent=text;
-      bubble.append(label,body);box.appendChild(bubble);box.scrollTop=box.scrollHeight;
-      return bubble;
+      const bubble=document.createElement("div");bubble.className="chat-bubble "+role+(pending?" pending":"");bubble.dataset.messageText=text;if(messageId)bubble.dataset.messageId=String(messageId);
+      const label=document.createElement("small");label.textContent=role==="user"?"You":"ConnectAI assistant";
+      const body=document.createElement("div");if(role==="model"&&!pending)body.innerHTML=formatAnswer(text);else body.textContent=text;
+      bubble.append(label,body);
+      if(role==="model"&&!pending){const actions=document.createElement("div");actions.className="message-actions";const copy=document.createElement("button");copy.type="button";copy.className="text-tool";copy.textContent="Copy";copy.addEventListener("click",async()=>{try{await navigator.clipboard.writeText(text);copy.textContent="Copied ✓";setTimeout(()=>copy.textContent="Copy",1400);}catch(_){errorBox.textContent="Clipboard access is unavailable.";errorBox.hidden=false;}});actions.append(copy);
+        if(messageId){const feedback=document.createElement("button");feedback.type="button";feedback.className="text-tool";feedback.textContent="Rate response";feedback.addEventListener("click",async()=>{const raw=prompt("Rate this answer from 1 (poor) to 5 (excellent):","5");if(raw===null)return;const rating=Number(raw);if(!Number.isInteger(rating)||rating<1||rating>5){errorBox.textContent="Enter a number from 1 to 5.";errorBox.hidden=false;return;}const comment=prompt("Optional feedback (500 characters maximum):","")||"";try{const res=await fetch(`/api/modules/${encodeURIComponent(slug)}/feedback`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({csrf_token:csrf,message_id:messageId,rating,comment})});if(!res.ok)throw new Error(await res.text());feedback.textContent="Thanks for your feedback ✓";feedback.disabled=true;}catch(err){errorBox.textContent=err.message||"Unable to save feedback.";errorBox.hidden=false;}});actions.append(feedback);}
+        bubble.append(actions);}
+      box.appendChild(bubble);box.scrollTop=box.scrollHeight;return bubble;
     };
+    const searchInput=document.getElementById("chatSearch");if(searchInput)searchInput.addEventListener("input",()=>{const q=searchInput.value.trim().toLocaleLowerCase();box.querySelectorAll(".chat-bubble").forEach(b=>b.hidden=!!q&&!(b.dataset.messageText||"").toLocaleLowerCase().includes(q));});
     const loadHistory=async()=>{
       try{
         const response=await fetch(`/api/modules/${encodeURIComponent(slug)}/messages`);
         if(!response.ok) return;
         const messages=await response.json();
-        messages.forEach(m=>addMessage(m.role==="user"?"user":"model",m.text));
+        messages.forEach(m=>addMessage(m.role==="user"?"user":"model",m.text,false,m.id));refreshRegenerate();
       }catch(_){}
     };
     loadHistory();
@@ -63,15 +69,12 @@ document.addEventListener("DOMContentLoaded", () => {
     if(exportButton) exportButton.addEventListener("click",()=>{
       const bubbles=[...box.querySelectorAll(".chat-bubble")];
       if(!bubbles.length){errorBox.textContent="There is no conversation to export yet.";errorBox.hidden=false;return;}
-      const transcript=bubbles.map(b=>{
-        const label=b.querySelector("small")?.textContent||"Message";
-        const body=b.querySelector("div")?.textContent||"";
-        return `${label}\n${body}`;
-      }).join("\n\n");
-      const blob=new Blob([transcript],{type:"text/plain;charset=utf-8"});
+      const transcript=bubbles.map(b=>{const label=b.querySelector("small")?.textContent||"Message";return `## ${label}\n\n${b.dataset.messageText||""}`;}).join("\n\n---\n\n");
+      const blob=new Blob([`# ConnectAI Hub — ${slug} conversation\n\n${transcript}`],{type:"text/markdown;charset=utf-8"});
       const url=URL.createObjectURL(blob);const link=document.createElement("a");
-      link.href=url;link.download=`connectai-${slug}-conversation.txt`;link.click();URL.revokeObjectURL(url);
+      link.href=url;link.download=`connectai-${slug}-conversation.md`;link.click();URL.revokeObjectURL(url);
     });
+    if(regenerateButton)regenerateButton.addEventListener("click",async()=>{if(regenerateButton.disabled)return;regenerateButton.disabled=true;regenerateButton.textContent="Regenerating…";errorBox.hidden=true;const old=[...box.querySelectorAll(".chat-bubble.model")];const previous=old[old.length-1];const pending=addMessage("model","Generating a fresh answer…",true);try{const response=await fetch(`/api/modules/${encodeURIComponent(slug)}/regenerate`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({csrf_token:csrf})});const text=await response.text();if(!response.ok)throw new Error(text||"Unable to regenerate this answer.");const data=JSON.parse(text);pending.remove();if(previous)previous.remove();addMessage("model",data.answer||"No response was returned.");}catch(err){pending.remove();errorBox.textContent=err.message||"Regeneration failed.";errorBox.hidden=false;}finally{regenerateButton.textContent="Regenerate answer";refreshRegenerate();}});
     const clearButton=document.getElementById("clearChat");
     if(clearButton) clearButton.addEventListener("click",async()=>{
       if(!confirm("Clear this module's saved conversation? This cannot be undone."))return;
@@ -87,6 +90,11 @@ document.addEventListener("DOMContentLoaded", () => {
       }catch(err){errorBox.textContent=err.message||"Unable to clear conversation.";errorBox.hidden=false;}
       finally{clearButton.disabled=false;}
     });
+
+
+    const tempSlider=document.getElementById("workspaceTemperature"),tempValue=document.getElementById("temperatureValue");
+    if(tempSlider&&tempValue)tempSlider.addEventListener("input",()=>tempValue.textContent=Number(tempSlider.value).toFixed(1));
+    document.getElementById("saveWorkspacePreferences")?.addEventListener("click",async()=>{const status=document.getElementById("workspaceSaveStatus"),btn=document.getElementById("saveWorkspacePreferences");btn.disabled=true;status.textContent="Saving…";try{const res=await fetch(`/api/modules/${encodeURIComponent(slug)}/preferences`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({csrf_token:csrf,instructions:document.getElementById("workspaceInstructions").value,temperature:Number(tempSlider.value),pinned:document.getElementById("workspacePinned").checked})});if(!res.ok)throw new Error(await res.text());status.textContent="Preferences saved.";}catch(err){status.textContent=err.message||"Unable to save preferences.";}finally{btn.disabled=false;}});
 
     const uploadForm=document.getElementById("documentUpload");
     if(uploadForm){
@@ -136,7 +144,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const text=await response.text();
         if(!response.ok) throw new Error(text||"The request could not be completed.");
         let data;try{data=JSON.parse(text)}catch(_){throw new Error("The server returned an invalid response.")}
-        pending.remove();addMessage("model",data.answer||"No response was returned.");
+        pending.remove();addMessage("model",data.answer||"No response was returned.",false,data.message_id);refreshRegenerate();
       }catch(err){
         pending.remove();errorBox.textContent=err.message||"Something went wrong. Please try again.";errorBox.hidden=false;
       }finally{

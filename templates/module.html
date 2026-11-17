@@ -16,9 +16,10 @@
         <span class="quick-prompts-label">TRY ONE OF THESE</span>
         <div class="quick-prompt-list">{{range .QuickPrompts}}<button type="button" class="quick-prompt" data-prompt="{{.}}">{{.}}</button>{{end}}</div>
       </div>
+      <details class="workspace-settings"><summary>Workspace preferences</summary><div class="workspace-settings-body"><label for="workspaceInstructions">Custom instructions for this workspace</label><textarea id="workspaceInstructions" maxlength="1200" placeholder="Example: Explain concepts in simple steps and give one example.">{{.WorkspaceInstructions}}</textarea><label for="workspaceTemperature">Creativity <span id="temperatureValue">{{printf "%.1f" .WorkspaceTemperature}}</span></label><input id="workspaceTemperature" type="range" min="0.1" max="1.0" step="0.1" value="{{printf "%.1f" .WorkspaceTemperature}}"><label class="pin-workspace"><input id="workspacePinned" type="checkbox" {{if .WorkspacePinned}}checked{{end}}> Pin this workspace on my dashboard</label><button class="button button-ghost" id="saveWorkspacePreferences" type="button">Save preferences</button><small id="workspaceSaveStatus" aria-live="polite"></small></div></details>
       <div class="chat-tools">
         <span>Your conversation is private to your account.</span>
-        <div><button type="button" class="text-tool" id="exportChat">Export chat</button><button type="button" class="text-tool danger-tool" id="clearChat">Clear chat</button></div>
+        <div><a class="text-tool" href="/prompts">Prompt library</a><button type="button" class="text-tool" id="exportChat">Export .md</button><button type="button" class="text-tool" id="regenerateLast" disabled>Regenerate answer</button><button type="button" class="text-tool danger-tool" id="clearChat">Clear chat</button></div>
       </div>
       {{if or (eq .Module.Slug "documents") (eq .Module.Slug "data")}}
       <form class="document-upload" id="documentUpload" data-module="{{.Module.Slug}}" data-csrf="{{.CSRF}}">
@@ -34,12 +35,12 @@
         <small>Supported: TXT, MD, CSV, JSON, LOG, PDF, DOCX and XLSX.</small>
       </form>
       {{end}}
-      <div class="chat-messages" id="chatMessages" aria-live="polite">
+      <label class="chat-search-label" for="chatSearch">Search this conversation</label><input id="chatSearch" class="chat-search" type="search" placeholder="Find a word or phrase in this chat..."><div class="chat-messages" id="chatMessages" aria-live="polite">
         <div class="chat-empty" id="chatEmpty"><span>✦</span><b>Your conversation starts here.</b><p>Ask a question or describe what you'd like help with.</p></div>
       </div>
       <form class="chat-form" id="chatForm" data-module="{{.Module.Slug}}" data-csrf="{{.CSRF}}">
         <label class="sr-only" for="chatInput">Your message</label>
-        <textarea id="chatInput" rows="3" maxlength="8000" placeholder="Message your {{.Module.Name}} assistant..." required></textarea>
+        <textarea id="chatInput" rows="3" maxlength="8000" data-initial-prompt="{{.Name}}" placeholder="Message your {{.Module.Name}} assistant..." required></textarea>
         <div class="chat-form-bottom"><span>Don't share passwords, API keys or private information.</span><button class="button" id="sendButton" type="submit">Send message ↗</button></div>
       </form>
       <p class="chat-error" id="chatError" role="alert" hidden></p>

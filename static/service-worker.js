@@ -1,6 +1,6 @@
 /* ConnectAI Hub PWA worker. Keep installation lightweight: do not wait for a
    large cache.addAll() request before the browser can finish installing. */
-const CACHE_NAME = "connectai-static-v5";
+const CACHE_NAME = "connectai-shell-v23";
 const STATIC_ASSETS = [
   "/static/css/app.css", "/static/css/auth.css", "/static/css/chat.css",
   "/static/js/app.js", "/static/manifest.webmanifest",

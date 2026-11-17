@@ -73,6 +73,13 @@ CREATE TABLE IF NOT EXISTS plan_payments (
     paid_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS plan_payments_user_created_idx ON plan_payments(user_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS notification_preferences (
+    user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    email_notifications BOOLEAN NOT NULL DEFAULT TRUE,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+INSERT INTO notification_preferences(user_id,email_notifications)
+SELECT id,TRUE FROM users ON CONFLICT(user_id) DO NOTHING;
 CREATE TABLE IF NOT EXISTS sessions (
     id BIGSERIAL PRIMARY KEY,
     user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -101,6 +108,15 @@ CREATE TABLE IF NOT EXISTS ai_messages (
 );
 CREATE INDEX IF NOT EXISTS ai_messages_user_module_created_idx
     ON ai_messages(user_id, module_slug, created_at DESC, id DESC);
+CREATE TABLE IF NOT EXISTS saved_prompts (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    module_slug TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS saved_prompts_user_created_idx ON saved_prompts(user_id, created_at DESC);
 CREATE TABLE IF NOT EXISTS ai_usage (
     id BIGSERIAL PRIMARY KEY,
     user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -113,6 +129,57 @@ CREATE TABLE IF NOT EXISTS ai_usage (
 CREATE INDEX IF NOT EXISTS ai_usage_user_created_idx ON ai_usage(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS ai_usage_user_module_idx ON ai_usage(user_id, module_slug);
 CREATE INDEX IF NOT EXISTS ai_usage_created_idx ON ai_usage(created_at DESC);
+ALTER TABLE ai_usage DROP CONSTRAINT IF EXISTS ai_usage_request_type_check;
+ALTER TABLE ai_usage ADD CONSTRAINT ai_usage_request_type_check CHECK (request_type IN ('chat','file_analysis','regenerate'));
+CREATE TABLE IF NOT EXISTS ai_message_feedback (
+ id BIGSERIAL PRIMARY KEY,
+ user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ message_id BIGINT NOT NULL REFERENCES ai_messages(id) ON DELETE CASCADE,
+ rating SMALLINT NOT NULL CHECK (rating BETWEEN 1 AND 5),
+ comment TEXT NOT NULL DEFAULT '',
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ UNIQUE(user_id,message_id)
+);
+CREATE TABLE IF NOT EXISTS workspace_preferences (
+ user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ module_slug TEXT NOT NULL,
+ custom_instructions TEXT NOT NULL DEFAULT '',
+ temperature DOUBLE PRECISION NOT NULL DEFAULT 0.7 CHECK (temperature BETWEEN 0.1 AND 1.0),
+ pinned BOOLEAN NOT NULL DEFAULT FALSE,
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ PRIMARY KEY(user_id,module_slug)
+);
+CREATE TABLE IF NOT EXISTS ai_response_versions (
+ id BIGSERIAL PRIMARY KEY,
+ user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ module_slug TEXT NOT NULL,
+ user_message_id BIGINT NOT NULL REFERENCES ai_messages(id) ON DELETE CASCADE,
+ response_text TEXT NOT NULL,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ai_response_versions_user_idx ON ai_response_versions(user_id,module_slug,created_at DESC);
+CREATE TABLE IF NOT EXISTS ai_model_events (
+ id BIGSERIAL PRIMARY KEY,
+ event_type TEXT NOT NULL,
+ model TEXT NOT NULL,
+ duration_ms BIGINT NOT NULL DEFAULT 0,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ai_model_events_created_idx ON ai_model_events(created_at DESC);
+CREATE TABLE IF NOT EXISTS website_projects (
+ id BIGSERIAL PRIMARY KEY,
+ user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ title TEXT NOT NULL,
+ prompt TEXT NOT NULL,
+ html TEXT NOT NULL,
+ css TEXT NOT NULL DEFAULT '',
+ js TEXT NOT NULL DEFAULT '',
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS website_projects_user_updated_idx ON website_projects(user_id,updated_at DESC);
+ALTER TABLE ai_usage DROP CONSTRAINT IF EXISTS ai_usage_request_type_check;
+ALTER TABLE ai_usage ADD CONSTRAINT ai_usage_request_type_check CHECK (request_type IN ('chat','file_analysis','regenerate','website_build'));
 CREATE INDEX IF NOT EXISTS users_created_idx ON users(created_at DESC);
 `
 	_, err := db.Exec(schema)

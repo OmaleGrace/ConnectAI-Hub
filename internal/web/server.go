@@ -1,6 +1,7 @@
 package web
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -18,6 +19,7 @@ import (
 	"net/smtp"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,33 +40,63 @@ type User struct {
 	IsAdmin     bool
 }
 type PageData struct {
-	Title, Active, CSRF, Error, Success, Name string
-	UsageTotal, UsageMonth                    int64
-	DailyUsed, DailyRemaining, UserDailyLimit int64
-	UserPlan                                  string
-	PlusPriceNaira                            int64
-	PlusExpiresAt                             time.Time
-	UnreadNotifications                       int64
-	Phone                                     string
-	PhoneVerified                             bool
-	AdminUsers, AdminRequests, DailyLimit     int64
-	AdminUserList                             []AdminUserInfo
-	AdminUserDetail                           *AdminUserInfo
-	AdminPage, AdminPages                     int
-	AdminQuery, AdminPurpose                  string
-	ModuleUsage                               []ModuleUsage
-	Sessions                                  []SessionInfo
-	Modules                                   []Module
-	Notifications                             []NotificationItem
-	Module                                    Module
-	QuickPrompts                              []string
-	User                                      *User
+	Title, Active, CSRF, Error, Success, Name       string
+	UsageTotal, UsageMonth                          int64
+	DailyUsed, DailyRemaining, UserDailyLimit       int64
+	UserPlan                                        string
+	PlusPriceNaira                                  int64
+	PlusExpiresAt                                   time.Time
+	UnreadNotifications                             int64
+	Phone                                           string
+	PhoneVerified                                   bool
+	AdminUsers, AdminRequests, DailyLimit           int64
+	AdminRevenue, AdminPaidPayments, AdminPlusUsers int64
+	FeedbackCount                                   float64
+	AverageRating                                   float64
+	Payments                                        []PaymentInfo
+	NotificationEmail                               bool
+	AdminUserList                                   []AdminUserInfo
+	AdminUserDetail                                 *AdminUserInfo
+	AdminPage, AdminPages                           int
+	AdminQuery, AdminPurpose                        string
+	ModuleUsage                                     []ModuleUsage
+	Sessions                                        []SessionInfo
+	Modules                                         []Module
+	SavedPrompts                                    []SavedPrompt
+	Notifications                                   []NotificationItem
+	Module                                          Module
+	WorkspaceInstructions                           string
+	WorkspaceTemperature                            float64
+	WorkspacePinned                                 bool
+	AIModelEvents                                   []AIModelEvent
+	AIModelTotals                                   map[string]int64
+	WebsiteProjects                                 []WebsiteProject
+	WebsiteProject                                  *WebsiteProject
+	QuickPrompts                                    []string
+	User                                            *User
+}
+type SavedPrompt struct {
+	ID                        int64
+	Title, ModuleSlug, Prompt string
+	CreatedAt                 time.Time
+}
+type WebsiteProject struct {
+	ID                           int64
+	Title, Prompt, HTML, CSS, JS string
+	CreatedAt, UpdatedAt         time.Time
 }
 type NotificationItem struct {
 	ID             int64
 	Title, Message string
 	Read           bool
 	CreatedAt      time.Time
+}
+type PaymentInfo struct {
+	Reference, Currency, Status string
+	Amount                      int64
+	CreatedAt                   time.Time
+	PaidAt                      sql.NullTime
+	UserName, UserEmail         string
 }
 type ModuleUsage struct {
 	Name  string
@@ -77,6 +109,10 @@ type AdminUserInfo struct {
 	Requests, DailyLimit                      int64
 	Plan                                      string
 	IsAdmin, Suspended                        bool
+}
+type AIModelEvent struct {
+	EventType, Model string
+	Count            int64
 }
 type SessionInfo struct {
 	CreatedAt, ExpiresAt time.Time
@@ -129,6 +165,12 @@ func New(db *sql.DB) (*Server, error) {
 			return nil, err
 		}
 	}
+	s.gemini.SetEventLogger(func(eventType, model string, duration time.Duration) {
+		// Operational telemetry only: never store user prompts, response text or API keys.
+		if _, err := db.Exec(`INSERT INTO ai_model_events(event_type,model,duration_ms) VALUES($1,$2,$3)`, eventType, model, duration.Milliseconds()); err != nil {
+			log.Printf("connectai: unable to record AI model event: %v", err)
+		}
+	})
 	s.routes()
 	return s, nil
 }
@@ -171,11 +213,17 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /dashboard", s.dashboard)
 	s.mux.HandleFunc("POST /billing/plus", s.startPlusPayment)
 	s.mux.HandleFunc("GET /billing/callback", s.finishPlusPayment)
+	s.mux.HandleFunc("GET /prompts", s.promptsPage)
+	s.mux.HandleFunc("POST /prompts", s.createPrompt)
+	s.mux.HandleFunc("POST /prompts/{id}/delete", s.deletePrompt)
 	s.mux.HandleFunc("GET /settings", s.settingsPage)
 	s.mux.HandleFunc("POST /settings/phone", s.updatePhone)
 	s.mux.HandleFunc("POST /settings/phone/verify", s.verifyPhoneEmailCode)
 	s.mux.HandleFunc("GET /notifications", s.notificationsPage)
 	s.mux.HandleFunc("POST /notifications/{id}/read", s.markNotificationRead)
+	s.mux.HandleFunc("POST /notifications/read-all", s.markAllNotificationsRead)
+	s.mux.HandleFunc("POST /settings/notifications", s.updateNotificationPreferences)
+	s.mux.HandleFunc("GET /settings/billing", s.billingPage)
 	s.mux.HandleFunc("GET /settings/sessions", s.sessionsPage)
 	s.mux.HandleFunc("POST /settings/sessions/revoke", s.revokeSessions)
 	s.mux.HandleFunc("GET /admin", s.adminDashboard)
@@ -187,6 +235,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /settings/password", s.updatePassword)
 	s.mux.HandleFunc("POST /settings/password-reset", s.requestPasswordReset)
 	s.mux.HandleFunc("POST /settings/delete", s.deleteAccount)
+	s.mux.HandleFunc("GET /settings/data-export", s.exportAccountData)
+	s.mux.HandleFunc("POST /settings/history/delete", s.deleteAIHistory)
 	s.mux.HandleFunc("GET /forgot-password", s.forgotPasswordPage)
 	s.mux.HandleFunc("POST /forgot-password", s.forgotPassword)
 	s.mux.HandleFunc("GET /reset-password", s.resetPasswordPage)
@@ -199,9 +249,18 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /login", s.login)
 	s.mux.HandleFunc("POST /logout", s.logout)
 	s.mux.HandleFunc("POST /api/modules/{slug}/chat", s.chat)
+	s.mux.HandleFunc("POST /api/modules/{slug}/regenerate", s.regenerate)
+	s.mux.HandleFunc("POST /api/modules/{slug}/feedback", s.saveMessageFeedback)
+	s.mux.HandleFunc("POST /api/modules/{slug}/preferences", s.saveWorkspacePreferences)
+	s.mux.HandleFunc("GET /api/modules/{slug}/versions/{messageID}", s.responseVersions)
 	s.mux.HandleFunc("GET /api/modules/{slug}/messages", s.messages)
 	s.mux.HandleFunc("DELETE /api/modules/{slug}/messages", s.clearMessages)
 	s.mux.HandleFunc("POST /api/modules/{slug}/analyze", s.analyzeUpload)
+	s.mux.HandleFunc("GET /builder", s.websiteBuilderPage)
+	s.mux.HandleFunc("POST /builder/generate", s.generateWebsite)
+	s.mux.HandleFunc("GET /builder/projects/{id}", s.websiteProjectPage)
+	s.mux.HandleFunc("POST /builder/projects/{id}/delete", s.deleteWebsiteProject)
+	s.mux.HandleFunc("GET /builder/projects/{id}/download", s.downloadWebsiteProject)
 }
 func (s *Server) render(w http.ResponseWriter, name string, d PageData) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -281,13 +340,27 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM ai_usage WHERE user_id=$1`, u.ID).Scan(&total)
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM ai_usage WHERE user_id=$1 AND created_at >= date_trunc('month', NOW())`, u.ID).Scan(&month)
 	plan, limit, used := s.userUsage(u.ID)
+	// Pinned workspaces appear first while preserving the default order for the rest.
+	pinnedRows, pinErr := s.db.Query(`SELECT module_slug FROM workspace_preferences WHERE user_id=$1 AND pinned=TRUE`, u.ID)
+	workspaceModules := append([]Module(nil), s.modules...)
+	pinned := map[string]bool{}
+	if pinErr == nil {
+		for pinnedRows.Next() {
+			var slug string
+			if pinnedRows.Scan(&slug) == nil {
+				pinned[slug] = true
+			}
+		}
+		pinnedRows.Close()
+	}
+	sort.SliceStable(workspaceModules, func(i, j int) bool { return pinned[workspaceModules[i].Slug] && !pinned[workspaceModules[j].Slug] })
 	remaining := limit - used
 	var unread int64
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM notifications WHERE user_id=$1 AND is_read=FALSE`, u.ID).Scan(&unread)
 	if remaining < 0 {
 		remaining = 0
 	}
-	s.render(w, "dashboard.html", PageData{Title: "Your workspace", Modules: s.modules, Active: "dashboard", User: u, CSRF: s.csrf(w, r), UsageTotal: total, UsageMonth: month, UserPlan: plan, UserDailyLimit: limit, DailyUsed: used, DailyRemaining: remaining, PlusPriceNaira: paystackPlusPriceNaira(), UnreadNotifications: unread, Name: map[string]string{"success": "success", "active": "active", "unverified": "unverified"}[r.URL.Query().Get("billing")]})
+	s.render(w, "dashboard.html", PageData{Title: "Your workspace", Modules: workspaceModules, Active: "dashboard", User: u, CSRF: s.csrf(w, r), UsageTotal: total, UsageMonth: month, UserPlan: plan, UserDailyLimit: limit, DailyUsed: used, DailyRemaining: remaining, PlusPriceNaira: paystackPlusPriceNaira(), UnreadNotifications: unread, Name: map[string]string{"success": "success", "active": "active", "unverified": "unverified"}[r.URL.Query().Get("billing")]})
 }
 func (s *Server) module(w http.ResponseWriter, r *http.Request) {
 	u := s.currentUser(r)
@@ -297,12 +370,205 @@ func (s *Server) module(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, m := range s.modules {
 		if m.Slug == r.PathValue("slug") {
-			s.render(w, "module.html", PageData{Title: m.Name, Modules: s.modules, Module: m, QuickPrompts: moduleQuickPrompts(m.Slug), Active: m.Slug, User: u, CSRF: s.csrf(w, r)})
+			var instructions string
+			var temperature float64
+			var pinned bool
+			_ = s.db.QueryRow(`SELECT custom_instructions,temperature,pinned FROM workspace_preferences WHERE user_id=$1 AND module_slug=$2`, u.ID, m.Slug).Scan(&instructions, &temperature, &pinned)
+			if temperature == 0 {
+				temperature = 0.7
+			}
+			s.render(w, "module.html", PageData{Title: m.Name, Modules: s.modules, Module: m, QuickPrompts: moduleQuickPrompts(m.Slug), Active: m.Slug, User: u, CSRF: s.csrf(w, r), Name: r.URL.Query().Get("prompt"), WorkspaceInstructions: instructions, WorkspaceTemperature: temperature, WorkspacePinned: pinned})
 			return
 		}
 	}
 	http.NotFound(w, r)
 }
+
+func (s *Server) websiteBuilderPage(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	rows, err := s.db.Query(`SELECT id,title,prompt,created_at,updated_at FROM website_projects WHERE user_id=$1 ORDER BY updated_at DESC LIMIT 30`, u.ID)
+	if err != nil {
+		http.Error(w, "Unable to load your website projects.", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	projects := []WebsiteProject{}
+	for rows.Next() {
+		var p WebsiteProject
+		if rows.Scan(&p.ID, &p.Title, &p.Prompt, &p.CreatedAt, &p.UpdatedAt) == nil {
+			projects = append(projects, p)
+		}
+	}
+	var unread int64
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM notifications WHERE user_id=$1 AND is_read=FALSE`, u.ID).Scan(&unread)
+	s.render(w, "builder.html", PageData{Title: "AI Website Builder", Active: "builder", User: u, CSRF: s.csrf(w, r), WebsiteProjects: projects, UnreadNotifications: unread, Success: r.URL.Query().Get("success"), Error: r.URL.Query().Get("error")})
+}
+
+func (s *Server) generateWebsite(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 12<<10)
+	if err := r.ParseForm(); err != nil || !s.validCSRF(r) {
+		http.Error(w, "Your form expired. Refresh and try again.", http.StatusForbidden)
+		return
+	}
+	prompt := strings.TrimSpace(r.FormValue("prompt"))
+	if len(prompt) < 20 || len(prompt) > 8000 {
+		http.Redirect(w, r, "/builder?error=Please+write+a+website+description+between+20+and+8000+characters.", http.StatusSeeOther)
+		return
+	}
+	if !s.allowRate("builder:"+fmt.Sprint(u.ID), 3, 10*time.Minute) {
+		http.Redirect(w, r, "/builder?error=Please+wait+before+generating+another+website.", http.StatusSeeOther)
+		return
+	}
+	if !s.withinDailyLimit(w, u.ID) {
+		return
+	}
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM website_projects WHERE user_id=$1`, u.ID).Scan(&count); err != nil {
+		http.Error(w, "Unable to check project limit.", 500)
+		return
+	}
+	if count >= 30 {
+		http.Redirect(w, r, "/builder?error=You+have+reached+the+30+website+project+limit.", http.StatusSeeOther)
+		return
+	}
+
+	instruction := `You are a senior web designer and frontend developer. Build a polished, responsive, accessible website from the user's brief. Return ONLY valid JSON with exactly these string keys: title, html, css, js. html must contain only the body markup (no html/head/body tags); css must be standalone CSS; js must be vanilla JavaScript. Do not include markdown fences. Do not use external libraries, remote scripts, trackers, forms that submit to unknown endpoints, or requests to external services. Do not include secrets. Make all navigation internal anchors where possible. Use semantic HTML, responsive layout, accessible labels, keyboard-friendly controls, realistic placeholder copy, and a coherent visual design. Keep code compact enough to fit the output limit.`
+	ctx, cancel := context.WithTimeout(r.Context(), 150*time.Second)
+	defer cancel()
+	output, err := s.gemini.GenerateWithLimits(ctx, instruction, nil, prompt, 0.65, 8192)
+	if err != nil {
+		log.Printf("connectai: website generation failed user_id=%d error=%v", u.ID, err)
+		http.Redirect(w, r, "/builder?error=The+AI+builder+could+not+finish+this+website.+Please+try+a+shorter+brief.", http.StatusSeeOther)
+		return
+	}
+	var generated struct {
+		Title string `json:"title"`
+		HTML  string `json:"html"`
+		CSS   string `json:"css"`
+		JS    string `json:"js"`
+	}
+	clean := strings.TrimSpace(output)
+	clean = strings.TrimPrefix(clean, "```json")
+	clean = strings.TrimPrefix(clean, "```")
+	clean = strings.TrimSuffix(clean, "```")
+	if err := json.Unmarshal([]byte(strings.TrimSpace(clean)), &generated); err != nil {
+		log.Printf("connectai: website generation returned invalid JSON user_id=%d", u.ID)
+		http.Redirect(w, r, "/builder?error=The+AI+returned+an+incomplete+website.+Please+try+again.", http.StatusSeeOther)
+		return
+	}
+	generated.Title = strings.TrimSpace(generated.Title)
+	generated.HTML = strings.TrimSpace(generated.HTML)
+	generated.CSS = strings.TrimSpace(generated.CSS)
+	generated.JS = strings.TrimSpace(generated.JS)
+	if generated.Title == "" || generated.HTML == "" || len(generated.HTML) > 90000 || len(generated.CSS) > 60000 || len(generated.JS) > 30000 {
+		http.Redirect(w, r, "/builder?error=The+generated+website+was+too+large+or+incomplete.+Try+a+smaller+brief.", http.StatusSeeOther)
+		return
+	}
+	var id int64
+	err = s.db.QueryRow(`INSERT INTO website_projects(user_id,title,prompt,html,css,js) VALUES($1,$2,$3,$4,$5,$6) RETURNING id`, u.ID, generated.Title, prompt, generated.HTML, generated.CSS, generated.JS).Scan(&id)
+	if err != nil {
+		http.Error(w, "Unable to save your website project.", 500)
+		return
+	}
+	_, _ = s.db.Exec(`INSERT INTO ai_usage(user_id,module_slug,request_type,input_characters,output_characters) VALUES($1,'website','website_build',$2,$3)`, u.ID, len(prompt), len(output))
+	http.Redirect(w, r, fmt.Sprintf("/builder/projects/%d", id), http.StatusSeeOther)
+}
+
+func (s *Server) websiteProjectPage(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	var p WebsiteProject
+	err = s.db.QueryRow(`SELECT id,title,prompt,html,css,js,created_at,updated_at FROM website_projects WHERE id=$1 AND user_id=$2`, id, u.ID).Scan(&p.ID, &p.Title, &p.Prompt, &p.HTML, &p.CSS, &p.JS, &p.CreatedAt, &p.UpdatedAt)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	var unread int64
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM notifications WHERE user_id=$1 AND is_read=FALSE`, u.ID).Scan(&unread)
+	s.render(w, "builder-project.html", PageData{Title: p.Title, Active: "builder", User: u, CSRF: s.csrf(w, r), WebsiteProject: &p, UnreadNotifications: unread})
+}
+
+func (s *Server) deleteWebsiteProject(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	if !s.validCSRF(r) {
+		http.Error(w, "Your form expired. Refresh and try again.", http.StatusForbidden)
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	_, err = s.db.Exec(`DELETE FROM website_projects WHERE id=$1 AND user_id=$2`, id, u.ID)
+	if err != nil {
+		http.Error(w, "Unable to delete project.", 500)
+		return
+	}
+	http.Redirect(w, r, "/builder?success=Website+project+deleted.", http.StatusSeeOther)
+}
+
+func (s *Server) downloadWebsiteProject(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	var p WebsiteProject
+	err = s.db.QueryRow(`SELECT title,html,css,js FROM website_projects WHERE id=$1 AND user_id=$2`, id, u.ID).Scan(&p.Title, &p.HTML, &p.CSS, &p.JS)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	files := map[string]string{"index.html": `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>` + template.HTMLEscapeString(p.Title) + `</title><link rel="stylesheet" href="style.css"></head><body>` + p.HTML + `<script src="script.js"></script></body></html>`, "style.css": p.CSS, "script.js": p.JS, "README.txt": "Generated by ConnectAI Hub. Review the code and test it before publishing."}
+	for name, content := range files {
+		f, e := zw.Create(name)
+		if e != nil {
+			http.Error(w, "Unable to package website.", 500)
+			return
+		}
+		if _, e = f.Write([]byte(content)); e != nil {
+			http.Error(w, "Unable to package website.", 500)
+			return
+		}
+	}
+	if err := zw.Close(); err != nil {
+		http.Error(w, "Unable to package website.", 500)
+		return
+	}
+	slug := fmt.Sprintf("connectai-website-%d.zip", id)
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+slug+`"`)
+	_, _ = w.Write(buf.Bytes())
+}
+
 func (s *Server) registerPage(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "register.html", PageData{Title: "Create account", CSRF: s.csrf(w, r)})
 }
@@ -355,6 +621,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		s.render(w, "register.html", PageData{Title: "Create account", CSRF: s.csrf(w, r), Error: "That email may already be registered. Check it or log in."})
 		return
 	}
+	_, _ = s.db.Exec(`INSERT INTO notification_preferences(user_id,email_notifications) VALUES($1,TRUE) ON CONFLICT(user_id) DO NOTHING`, id)
 	if err = s.createSession(w, id); err != nil {
 		http.Error(w, "Account created, but sign-in failed. Please log in.", 500)
 		return
@@ -416,6 +683,98 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
+func (s *Server) promptsPage(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	rows, err := s.db.Query(`SELECT id,title,module_slug,prompt,created_at FROM saved_prompts WHERE user_id=$1 ORDER BY created_at DESC,id DESC`, u.ID)
+	if err != nil {
+		http.Error(w, "Unable to load your prompt library.", 500)
+		return
+	}
+	defer rows.Close()
+	items := make([]SavedPrompt, 0)
+	for rows.Next() {
+		var item SavedPrompt
+		if err := rows.Scan(&item.ID, &item.Title, &item.ModuleSlug, &item.Prompt, &item.CreatedAt); err != nil {
+			http.Error(w, "Unable to read saved prompts.", 500)
+			return
+		}
+		items = append(items, item)
+	}
+	var unread int64
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM notifications WHERE user_id=$1 AND is_read=FALSE`, u.ID).Scan(&unread)
+	s.render(w, "prompts.html", PageData{Title: "Prompt Library", Active: "prompts", User: u, CSRF: s.csrf(w, r), SavedPrompts: items, Modules: s.modules, UnreadNotifications: unread, Success: r.URL.Query().Get("success"), Error: r.URL.Query().Get("error")})
+}
+
+func (s *Server) createPrompt(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	if !s.validCSRF(r) {
+		http.Error(w, "Your form expired. Refresh and try again.", http.StatusForbidden)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "Invalid form.", 400)
+		return
+	}
+	title := strings.TrimSpace(r.FormValue("title"))
+	slug := strings.TrimSpace(r.FormValue("module_slug"))
+	prompt := strings.TrimSpace(r.FormValue("prompt"))
+	if len(title) < 2 || len(title) > 80 || len(prompt) < 2 || len(prompt) > 3000 {
+		http.Redirect(w, r, "/prompts?error=Please+provide+a+title+and+prompt+within+the+limits", http.StatusSeeOther)
+		return
+	}
+	if _, ok := s.findModule(slug); !ok {
+		http.Redirect(w, r, "/prompts?error=Choose+a+valid+AI+workspace", http.StatusSeeOther)
+		return
+	}
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM saved_prompts WHERE user_id=$1`, u.ID).Scan(&count); err != nil || count >= 100 {
+		http.Redirect(w, r, "/prompts?error=Your+prompt+library+is+full", http.StatusSeeOther)
+		return
+	}
+	_, err := s.db.Exec(`INSERT INTO saved_prompts(user_id,title,module_slug,prompt) VALUES($1,$2,$3,$4)`, u.ID, title, slug, prompt)
+	if err != nil {
+		http.Redirect(w, r, "/prompts?error=Unable+to+save+this+prompt", http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/prompts?success=Prompt+saved", http.StatusSeeOther)
+}
+
+func (s *Server) deletePrompt(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	if !s.validCSRF(r) {
+		http.Error(w, "Your form expired. Refresh and try again.", http.StatusForbidden)
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id < 1 {
+		http.NotFound(w, r)
+		return
+	}
+	result, err := s.db.Exec(`DELETE FROM saved_prompts WHERE id=$1 AND user_id=$2`, id, u.ID)
+	if err != nil {
+		http.Error(w, "Unable to delete this prompt.", 500)
+		return
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		http.NotFound(w, r)
+		return
+	}
+	http.Redirect(w, r, "/prompts?success=Prompt+deleted", http.StatusSeeOther)
+}
+
 func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request) {
 	u := s.currentUser(r)
 	if u == nil {
@@ -430,7 +789,12 @@ func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request) {
 	_ = s.db.QueryRow(`SELECT phone,COALESCE(phone_verified,FALSE) FROM users WHERE id=$1`, u.ID).Scan(&phone, &phoneVerified)
 	var unread int64
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM notifications WHERE user_id=$1 AND is_read=FALSE`, u.ID).Scan(&unread)
-	s.render(w, "settings.html", PageData{Title: "Account settings", Active: "settings", User: u, CSRF: s.csrf(w, r), UsageTotal: total, UsageMonth: month, Success: r.URL.Query().Get("saved"), Name: map[string]string{"sent": "reset-sent", "unavailable": "reset-unavailable", "verify": "delete-verify", "phone-sent": "phone-sent", "phone-ok": "phone-ok", "phone-failed": "phone-failed"}[firstNonEmpty(r.URL.Query().Get("reset"), firstNonEmpty(r.URL.Query().Get("delete"), r.URL.Query().Get("phone")))], Phone: phone.String, PhoneVerified: phoneVerified, UnreadNotifications: unread})
+	var emailNotifications bool
+	_ = s.db.QueryRow(`SELECT email_notifications FROM notification_preferences WHERE user_id=$1`, u.ID).Scan(&emailNotifications)
+	var plan string
+	var expires time.Time
+	_ = s.db.QueryRow(`SELECT COALESCE(plan,'free'),COALESCE(plus_expires_at,'epoch'::timestamptz) FROM users WHERE id=$1`, u.ID).Scan(&plan, &expires)
+	s.render(w, "settings.html", PageData{Title: "Account settings", Active: "settings", User: u, CSRF: s.csrf(w, r), UsageTotal: total, UsageMonth: month, Success: r.URL.Query().Get("saved"), Name: map[string]string{"sent": "reset-sent", "unavailable": "reset-unavailable", "verify": "delete-verify", "phone-sent": "phone-sent", "phone-ok": "phone-ok", "phone-failed": "phone-failed"}[firstNonEmpty(r.URL.Query().Get("data"), firstNonEmpty(r.URL.Query().Get("reset"), firstNonEmpty(r.URL.Query().Get("delete"), r.URL.Query().Get("phone"))))], Phone: phone.String, PhoneVerified: phoneVerified, UnreadNotifications: unread, UserPlan: plan, PlusExpiresAt: expires, NotificationEmail: emailNotifications})
 }
 
 func (s *Server) updateProfile(w http.ResponseWriter, r *http.Request) {
@@ -525,10 +889,12 @@ type chatRequest struct {
 	CSRF    string `json:"csrf_token"`
 }
 type chatResponse struct {
-	Answer string `json:"answer,omitempty"`
-	Error  string `json:"error,omitempty"`
+	MessageID int64  `json:"message_id,omitempty"`
+	Answer    string `json:"answer,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 type storedMessage struct {
+	ID        int64     `json:"id"`
 	Role      string    `json:"role"`
 	Text      string    `json:"text"`
 	CreatedAt time.Time `json:"created_at"`
@@ -769,7 +1135,9 @@ func (s *Server) notificationsPage(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	s.render(w, "notifications.html", PageData{Title: "Notifications", Active: "notifications", User: u, CSRF: s.csrf(w, r), Notifications: items, UnreadNotifications: unread})
+	var emailNotifications bool
+	_ = s.db.QueryRow(`SELECT email_notifications FROM notification_preferences WHERE user_id=$1`, u.ID).Scan(&emailNotifications)
+	s.render(w, "notifications.html", PageData{Title: "Notifications", Active: "notifications", User: u, CSRF: s.csrf(w, r), Notifications: items, UnreadNotifications: unread, NotificationEmail: emailNotifications})
 }
 func (s *Server) markNotificationRead(w http.ResponseWriter, r *http.Request) {
 	u := s.currentUser(r)
@@ -789,6 +1157,62 @@ func (s *Server) markNotificationRead(w http.ResponseWriter, r *http.Request) {
 	_, _ = s.db.Exec(`UPDATE notifications SET is_read=TRUE WHERE id=$1 AND user_id=$2`, id, u.ID)
 	http.Redirect(w, r, "/notifications", http.StatusSeeOther)
 }
+func (s *Server) markAllNotificationsRead(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	if err := r.ParseForm(); err != nil || !s.validCSRF(r) {
+		http.Error(w, "Your form expired. Refresh and try again.", 400)
+		return
+	}
+	_, _ = s.db.Exec(`UPDATE notifications SET is_read=TRUE WHERE user_id=$1 AND is_read=FALSE`, u.ID)
+	http.Redirect(w, r, "/notifications", http.StatusSeeOther)
+}
+func (s *Server) updateNotificationPreferences(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	if err := r.ParseForm(); err != nil || !s.validCSRF(r) {
+		http.Error(w, "Your form expired. Refresh and try again.", 400)
+		return
+	}
+	enabled := r.FormValue("email_notifications") == "on"
+	_, err := s.db.Exec(`INSERT INTO notification_preferences(user_id,email_notifications,updated_at) VALUES($1,$2,NOW()) ON CONFLICT(user_id) DO UPDATE SET email_notifications=EXCLUDED.email_notifications,updated_at=NOW()`, u.ID, enabled)
+	if err != nil {
+		http.Error(w, "Unable to save notification preferences.", 500)
+		return
+	}
+	http.Redirect(w, r, "/settings?saved=notifications", http.StatusSeeOther)
+}
+func (s *Server) billingPage(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	var plan string
+	var expires time.Time
+	_ = s.db.QueryRow(`SELECT COALESCE(plan,'free'),COALESCE(plus_expires_at,'epoch'::timestamptz) FROM users WHERE id=$1`, u.ID).Scan(&plan, &expires)
+	rows, err := s.db.Query(`SELECT reference,amount,currency,status,created_at,paid_at FROM plan_payments WHERE user_id=$1 ORDER BY created_at DESC LIMIT 50`, u.ID)
+	if err != nil {
+		http.Error(w, "Unable to load billing history.", 500)
+		return
+	}
+	defer rows.Close()
+	items := []PaymentInfo{}
+	for rows.Next() {
+		var x PaymentInfo
+		if rows.Scan(&x.Reference, &x.Amount, &x.Currency, &x.Status, &x.CreatedAt, &x.PaidAt) == nil {
+			items = append(items, x)
+		}
+	}
+	s.render(w, "billing.html", PageData{Title: "Billing and subscription", Active: "settings", User: u, CSRF: s.csrf(w, r), UserPlan: plan, PlusExpiresAt: expires, Payments: items})
+}
+
 func (s *Server) updatePhone(w http.ResponseWriter, r *http.Request) {
 	u := s.currentUser(r)
 	if u == nil {
@@ -915,10 +1339,38 @@ func (s *Server) adminDashboard(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	var modelEvents []AIModelEvent
+	modelRows, modelErr := s.db.Query(`SELECT event_type,model,COUNT(*) FROM ai_model_events WHERE created_at>=NOW()-INTERVAL '30 days' GROUP BY event_type,model ORDER BY COUNT(*) DESC`)
+	if modelErr == nil {
+		defer modelRows.Close()
+		for modelRows.Next() {
+			var e AIModelEvent
+			if modelRows.Scan(&e.EventType, &e.Model, &e.Count) == nil {
+				modelEvents = append(modelEvents, e)
+			}
+		}
+	}
+	var feedbackCount, averageRating float64
+	_ = s.db.QueryRow(`SELECT COUNT(*),COALESCE(AVG(rating),0) FROM ai_message_feedback`).Scan(&feedbackCount, &averageRating)
 	var users, requests, today int64
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&users)
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM ai_usage`).Scan(&requests)
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM ai_usage WHERE created_at >= date_trunc('day',NOW())`).Scan(&today)
+	var revenue, paidPayments, plusUsers int64
+	_ = s.db.QueryRow(`SELECT COALESCE(SUM(amount),0) FROM plan_payments WHERE status='paid'`).Scan(&revenue)
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM plan_payments WHERE status='paid'`).Scan(&paidPayments)
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE plan='plus' AND plus_expires_at>NOW()`).Scan(&plusUsers)
+	paymentRows, payErr := s.db.Query(`SELECT p.reference,p.amount,p.currency,p.status,p.created_at,p.paid_at,u.name,u.email FROM plan_payments p JOIN users u ON u.id=p.user_id ORDER BY p.created_at DESC LIMIT 25`)
+	adminPayments := []PaymentInfo{}
+	if payErr == nil {
+		defer paymentRows.Close()
+		for paymentRows.Next() {
+			var x PaymentInfo
+			if paymentRows.Scan(&x.Reference, &x.Amount, &x.Currency, &x.Status, &x.CreatedAt, &x.PaidAt, &x.UserName, &x.UserEmail) == nil {
+				adminPayments = append(adminPayments, x)
+			}
+		}
+	}
 	usage := []ModuleUsage{}
 	rows, err := s.db.Query(`SELECT module_slug,COUNT(*) FROM ai_usage GROUP BY module_slug ORDER BY COUNT(*) DESC`)
 	if err == nil {
@@ -970,7 +1422,7 @@ func (s *Server) adminDashboard(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Unable to load users", 500)
 		return
 	}
-	s.render(w, "admin.html", PageData{Title: "Admin dashboard", Active: "admin", User: u, CSRF: s.csrf(w, r), AdminUsers: users, AdminRequests: requests, UsageMonth: today, ModuleUsage: usage, AdminUserList: userList, AdminPage: page, AdminPages: pages, AdminQuery: query, AdminPurpose: purpose, Name: map[string]string{"1": "deleted", "suspended": "suspended", "active": "active"}[r.URL.Query().Get("status")]})
+	s.render(w, "admin.html", PageData{Title: "Admin dashboard", Active: "admin", User: u, CSRF: s.csrf(w, r), AdminUsers: users, AdminRequests: requests, UsageMonth: today, ModuleUsage: usage, AdminUserList: userList, AdminPage: page, AdminPages: pages, AdminQuery: query, AdminPurpose: purpose, AdminRevenue: revenue, AdminPaidPayments: paidPayments, AdminPlusUsers: plusUsers, Payments: adminPayments, AIModelEvents: modelEvents, FeedbackCount: feedbackCount, AverageRating: averageRating, Name: map[string]string{"1": "deleted", "suspended": "suspended", "active": "active"}[r.URL.Query().Get("status")]})
 }
 
 func (s *Server) adminUserDetail(w http.ResponseWriter, r *http.Request) {
@@ -1222,7 +1674,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Your message must contain between 1 and 8,000 characters.", http.StatusBadRequest)
 		return
 	}
-	instruction := moduleInstruction(module)
+	instruction, temperature := s.workspaceSettings(u.ID, module)
 	history := make([]ai.Message, 0, 12)
 	rows, err := s.db.Query(`SELECT role, message FROM ai_messages WHERE user_id=$1 AND module_slug=$2 ORDER BY created_at DESC, id DESC LIMIT 12`, u.ID, module.Slug)
 	if err != nil {
@@ -1243,7 +1695,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 80*time.Second)
 	defer cancel()
-	answer, err := s.gemini.Generate(ctx, instruction, history, prompt)
+	answer, err := s.gemini.GenerateWithTemperature(ctx, instruction, history, prompt, temperature)
 	if err != nil {
 		log.Printf("connectai: Gemini chat request failed: %v", err)
 		http.Error(w, safeAIError(err), http.StatusBadGateway)
@@ -1265,6 +1717,103 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := tx.Commit(); err != nil {
 		http.Error(w, "The response was generated but could not be saved.", http.StatusInternalServerError)
+		return
+	}
+	var responseID int64
+	_ = s.db.QueryRow(`SELECT id FROM ai_messages WHERE user_id=$1 AND module_slug=$2 AND role='model' ORDER BY id DESC LIMIT 1`, u.ID, module.Slug).Scan(&responseID)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(chatResponse{MessageID: responseID, Answer: answer})
+}
+
+// regenerate replaces the latest assistant answer using the latest user message.
+func (s *Server) regenerate(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		http.Error(w, "Please log in again.", http.StatusUnauthorized)
+		return
+	}
+	module, ok := s.findModule(r.PathValue("slug"))
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	var input struct {
+		CSRF string `json:"csrf_token"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<10)).Decode(&input); err != nil {
+		http.Error(w, "Invalid request.", 400)
+		return
+	}
+	cookie, err := r.Cookie("connectai_csrf")
+	if err != nil || cookie.Value == "" || input.CSRF != cookie.Value {
+		http.Error(w, "Your session check expired. Refresh the page and try again.", http.StatusForbidden)
+		return
+	}
+	if !s.allowRate("ai:"+fmt.Sprint(u.ID), 30, time.Minute) {
+		http.Error(w, "Too many requests. Please wait a minute and try again.", http.StatusTooManyRequests)
+		return
+	}
+	if !s.withinDailyLimit(w, u.ID) {
+		return
+	}
+	var messageID int64
+	var prompt string
+	if err = s.db.QueryRow(`SELECT id,message FROM ai_messages WHERE user_id=$1 AND module_slug=$2 AND role='user' ORDER BY id DESC LIMIT 1`, u.ID, module.Slug).Scan(&messageID, &prompt); err != nil {
+		http.Error(w, "There is no message to regenerate yet.", http.StatusNotFound)
+		return
+	}
+	history := make([]ai.Message, 0, 12)
+	rows, err := s.db.Query(`SELECT role,message FROM ai_messages WHERE user_id=$1 AND module_slug=$2 AND id<$3 ORDER BY id DESC LIMIT 12`, u.ID, module.Slug, messageID)
+	if err != nil {
+		http.Error(w, "Unable to load conversation history.", 500)
+		return
+	}
+	for rows.Next() {
+		var item ai.Message
+		if rows.Scan(&item.Role, &item.Text) == nil {
+			history = append(history, item)
+		}
+	}
+	rows.Close()
+	for i, j := 0, len(history)-1; i < j; i, j = i+1, j-1 {
+		history[i], history[j] = history[j], history[i]
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 80*time.Second)
+	defer cancel()
+	instruction, temperature := s.workspaceSettings(u.ID, module)
+	answer, err := s.gemini.GenerateWithTemperature(ctx, instruction, history, prompt, temperature)
+	if err != nil {
+		log.Printf("connectai: Gemini regeneration failed: %v", err)
+		http.Error(w, safeAIError(err), http.StatusBadGateway)
+		return
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		http.Error(w, "Unable to save the new response.", 500)
+		return
+	}
+	_, err = tx.Exec(`INSERT INTO ai_response_versions(user_id,module_slug,user_message_id,response_text) SELECT $1,$2,$3,message FROM ai_messages WHERE id=(SELECT id FROM ai_messages WHERE user_id=$1 AND module_slug=$2 AND role='model' AND id>$3 ORDER BY id ASC LIMIT 1)`, u.ID, module.Slug, messageID)
+	var result sql.Result
+	if err == nil {
+		result, err = tx.Exec(`UPDATE ai_messages SET message=$1 WHERE id=(SELECT id FROM ai_messages WHERE user_id=$2 AND module_slug=$3 AND role='model' AND id>$4 ORDER BY id ASC LIMIT 1)`, answer, u.ID, module.Slug, messageID)
+	}
+	if err == nil {
+		var n int64
+		n, err = result.RowsAffected()
+		if err == nil && n == 0 {
+			_, err = tx.Exec(`INSERT INTO ai_messages(user_id,module_slug,role,message) VALUES($1,$2,'model',$3)`, u.ID, module.Slug, answer)
+		}
+	}
+	if err == nil {
+		_, err = tx.Exec(`INSERT INTO ai_usage(user_id,module_slug,request_type,input_characters,output_characters) VALUES($1,$2,'regenerate',$3,$4)`, u.ID, module.Slug, len(prompt), len(answer))
+	}
+	if err != nil {
+		_ = tx.Rollback()
+		http.Error(w, "Unable to save the new response.", 500)
+		return
+	}
+	if err = tx.Commit(); err != nil {
+		http.Error(w, "Unable to save the new response.", 500)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -1423,6 +1972,149 @@ func (s *Server) analyzeUpload(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(chatResponse{Answer: answer})
 }
 
+func (s *Server) workspaceSettings(userID int64, module Module) (string, float64) {
+	var custom string
+	var temperature float64
+	_ = s.db.QueryRow(`SELECT custom_instructions,temperature FROM workspace_preferences WHERE user_id=$1 AND module_slug=$2`, userID, module.Slug).Scan(&custom, &temperature)
+	if temperature < 0.1 || temperature > 1.0 {
+		temperature = 0.7
+	}
+	base := moduleInstruction(module)
+	if strings.TrimSpace(custom) != "" {
+		base += " Additional preferences from this user (follow only when consistent with safety and accuracy): " + strings.TrimSpace(custom)
+	}
+	return base, temperature
+}
+
+func (s *Server) saveWorkspacePreferences(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		http.Error(w, "Please log in again.", 401)
+		return
+	}
+	slug := r.PathValue("slug")
+	if _, ok := s.findModule(slug); !ok {
+		http.NotFound(w, r)
+		return
+	}
+	var in struct {
+		CSRF         string  `json:"csrf_token"`
+		Instructions string  `json:"instructions"`
+		Temperature  float64 `json:"temperature"`
+		Pinned       bool    `json:"pinned"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&in); err != nil {
+		http.Error(w, "Invalid settings.", 400)
+		return
+	}
+	c, err := r.Cookie("connectai_csrf")
+	if err != nil || c.Value == "" || c.Value != in.CSRF {
+		http.Error(w, "Your form expired. Refresh and try again.", 403)
+		return
+	}
+	in.Instructions = strings.TrimSpace(in.Instructions)
+	if len(in.Instructions) > 1200 {
+		http.Error(w, "Custom instructions must be 1,200 characters or fewer.", 400)
+		return
+	}
+	if in.Temperature < 0.1 || in.Temperature > 1.0 {
+		http.Error(w, "Choose a creativity level between 0.1 and 1.0.", 400)
+		return
+	}
+	_, err = s.db.Exec(`INSERT INTO workspace_preferences(user_id,module_slug,custom_instructions,temperature,pinned,updated_at) VALUES($1,$2,$3,$4,$5,NOW()) ON CONFLICT(user_id,module_slug) DO UPDATE SET custom_instructions=EXCLUDED.custom_instructions,temperature=EXCLUDED.temperature,pinned=EXCLUDED.pinned,updated_at=NOW()`, u.ID, slug, in.Instructions, in.Temperature, in.Pinned)
+	if err != nil {
+		http.Error(w, "Unable to save workspace preferences.", 500)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+}
+
+func (s *Server) saveMessageFeedback(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		http.Error(w, "Please log in again.", 401)
+		return
+	}
+	slug := r.PathValue("slug")
+	if _, ok := s.findModule(slug); !ok {
+		http.NotFound(w, r)
+		return
+	}
+	var in struct {
+		CSRF      string `json:"csrf_token"`
+		MessageID int64  `json:"message_id"`
+		Rating    int    `json:"rating"`
+		Comment   string `json:"comment"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<10)).Decode(&in); err != nil {
+		http.Error(w, "Invalid feedback.", 400)
+		return
+	}
+	c, err := r.Cookie("connectai_csrf")
+	if err != nil || c.Value == "" || c.Value != in.CSRF {
+		http.Error(w, "Your form expired. Refresh and try again.", 403)
+		return
+	}
+	if in.MessageID <= 0 || in.Rating < 1 || in.Rating > 5 {
+		http.Error(w, "Choose a rating from 1 to 5.", 400)
+		return
+	}
+	if len(in.Comment) > 500 {
+		http.Error(w, "Feedback must be 500 characters or fewer.", 400)
+		return
+	}
+	var role string
+	if err = s.db.QueryRow(`SELECT role FROM ai_messages WHERE id=$1 AND user_id=$2 AND module_slug=$3`, in.MessageID, u.ID, slug).Scan(&role); err != nil || role != "model" {
+		http.Error(w, "That response could not be found.", 404)
+		return
+	}
+	_, err = s.db.Exec(`INSERT INTO ai_message_feedback(user_id,message_id,rating,comment) VALUES($1,$2,$3,$4) ON CONFLICT(user_id,message_id) DO UPDATE SET rating=EXCLUDED.rating,comment=EXCLUDED.comment,created_at=NOW()`, u.ID, in.MessageID, in.Rating, strings.TrimSpace(in.Comment))
+	if err != nil {
+		http.Error(w, "Unable to save feedback.", 500)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+}
+
+func (s *Server) responseVersions(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		http.Error(w, "Please log in again.", 401)
+		return
+	}
+	slug := r.PathValue("slug")
+	if _, ok := s.findModule(slug); !ok {
+		http.NotFound(w, r)
+		return
+	}
+	messageID, err := strconv.ParseInt(r.PathValue("messageID"), 10, 64)
+	if err != nil || messageID <= 0 {
+		http.Error(w, "Invalid message.", 400)
+		return
+	}
+	rows, err := s.db.Query(`SELECT response_text,created_at FROM ai_response_versions WHERE user_id=$1 AND module_slug=$2 AND user_message_id=$3 ORDER BY created_at DESC LIMIT 10`, u.ID, slug, messageID)
+	if err != nil {
+		http.Error(w, "Unable to load response versions.", 500)
+		return
+	}
+	defer rows.Close()
+	type version struct {
+		Text      string    `json:"text"`
+		CreatedAt time.Time `json:"created_at"`
+	}
+	items := []version{}
+	for rows.Next() {
+		var v version
+		if rows.Scan(&v.Text, &v.CreatedAt) == nil {
+			items = append(items, v)
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(items)
+}
+
 func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 	u := s.currentUser(r)
 	if u == nil {
@@ -1434,7 +2126,7 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	rows, err := s.db.Query(`SELECT role,message,created_at FROM (SELECT id,role,message,created_at FROM ai_messages WHERE user_id=$1 AND module_slug=$2 ORDER BY created_at DESC,id DESC LIMIT 50) recent ORDER BY created_at ASC,id ASC`, u.ID, slug)
+	rows, err := s.db.Query(`SELECT id,role,message,created_at FROM (SELECT id,role,message,created_at FROM ai_messages WHERE user_id=$1 AND module_slug=$2 ORDER BY created_at DESC,id DESC LIMIT 50) recent ORDER BY created_at ASC,id ASC`, u.ID, slug)
 	if err != nil {
 		http.Error(w, "Unable to load messages.", http.StatusInternalServerError)
 		return
@@ -1443,7 +2135,7 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 	messages := make([]storedMessage, 0)
 	for rows.Next() {
 		var item storedMessage
-		if err := rows.Scan(&item.Role, &item.Text, &item.CreatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.Role, &item.Text, &item.CreatedAt); err != nil {
 			http.Error(w, "Unable to read messages.", 500)
 			return
 		}
@@ -1687,6 +2379,165 @@ func (s *Server) resetPassword(w http.ResponseWriter, r *http.Request) {
 	}
 	http.Redirect(w, r, "/login?reset=1", http.StatusSeeOther)
 }
+
+// exportAccountData lets an authenticated user download a copy of their own
+// account data. Password hashes, session tokens and verification secrets are
+// deliberately excluded.
+func (s *Server) exportAccountData(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	var profile struct {
+		ID            int64          `json:"id"`
+		Name          string         `json:"name"`
+		Email         string         `json:"email"`
+		Phone         sql.NullString `json:"phone"`
+		PhoneVerified bool           `json:"phone_verified"`
+		Purpose       sql.NullString `json:"purpose"`
+		Organization  sql.NullString `json:"organization"`
+		Plan          string         `json:"plan"`
+		CreatedAt     time.Time      `json:"created_at"`
+	}
+	if err := s.db.QueryRow(`SELECT id,name,email,phone,phone_verified,purpose,organization,COALESCE(plan,'free'),created_at FROM users WHERE id=$1`, u.ID).Scan(&profile.ID, &profile.Name, &profile.Email, &profile.Phone, &profile.PhoneVerified, &profile.Purpose, &profile.Organization, &profile.Plan, &profile.CreatedAt); err != nil {
+		http.Error(w, "Unable to export account data.", http.StatusInternalServerError)
+		return
+	}
+	type messageRecord struct {
+		Module    string    `json:"module"`
+		Role      string    `json:"role"`
+		Message   string    `json:"message"`
+		CreatedAt time.Time `json:"created_at"`
+	}
+	messages := make([]messageRecord, 0)
+	rows, err := s.db.Query(`SELECT module_slug,role,message,created_at FROM ai_messages WHERE user_id=$1 ORDER BY created_at,id`, u.ID)
+	if err != nil {
+		http.Error(w, "Unable to export conversation history.", 500)
+		return
+	}
+	for rows.Next() {
+		var m messageRecord
+		if err := rows.Scan(&m.Module, &m.Role, &m.Message, &m.CreatedAt); err != nil {
+			rows.Close()
+			http.Error(w, "Unable to export conversation history.", 500)
+			return
+		}
+		messages = append(messages, m)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		http.Error(w, "Unable to export conversation history.", 500)
+		return
+	}
+	rows.Close()
+	type usageRecord struct {
+		Module           string    `json:"module"`
+		Type             string    `json:"type"`
+		InputCharacters  int       `json:"input_characters"`
+		OutputCharacters int       `json:"output_characters"`
+		CreatedAt        time.Time `json:"created_at"`
+	}
+	usage := make([]usageRecord, 0)
+	rows, err = s.db.Query(`SELECT module_slug,request_type,input_characters,output_characters,created_at FROM ai_usage WHERE user_id=$1 ORDER BY created_at`, u.ID)
+	if err != nil {
+		http.Error(w, "Unable to export usage history.", 500)
+		return
+	}
+	for rows.Next() {
+		var v usageRecord
+		if err := rows.Scan(&v.Module, &v.Type, &v.InputCharacters, &v.OutputCharacters, &v.CreatedAt); err != nil {
+			rows.Close()
+			http.Error(w, "Unable to export usage history.", 500)
+			return
+		}
+		usage = append(usage, v)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		http.Error(w, "Unable to export usage history.", 500)
+		return
+	}
+	rows.Close()
+	type paymentRecord struct {
+		Reference string       `json:"reference"`
+		Amount    int64        `json:"amount"`
+		Currency  string       `json:"currency"`
+		Status    string       `json:"status"`
+		CreatedAt time.Time    `json:"created_at"`
+		PaidAt    sql.NullTime `json:"paid_at"`
+	}
+	payments := make([]paymentRecord, 0)
+	rows, err = s.db.Query(`SELECT reference,amount,currency,status,created_at,paid_at FROM plan_payments WHERE user_id=$1 ORDER BY created_at`, u.ID)
+	if err != nil {
+		http.Error(w, "Unable to export payment history.", 500)
+		return
+	}
+	for rows.Next() {
+		var v paymentRecord
+		if err := rows.Scan(&v.Reference, &v.Amount, &v.Currency, &v.Status, &v.CreatedAt, &v.PaidAt); err != nil {
+			rows.Close()
+			http.Error(w, "Unable to export payment history.", 500)
+			return
+		}
+		payments = append(payments, v)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		http.Error(w, "Unable to export payment history.", 500)
+		return
+	}
+	rows.Close()
+	type exportData struct {
+		ExportedAt    time.Time       `json:"exported_at"`
+		Profile       any             `json:"profile"`
+		Conversations []messageRecord `json:"conversations"`
+		Usage         []usageRecord   `json:"usage"`
+		Payments      []paymentRecord `json:"payments"`
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="connectai-hub-data-%d.json"`, u.ID))
+	w.Header().Set("Cache-Control", "no-store, private")
+	_ = json.NewEncoder(w).Encode(exportData{time.Now().UTC(), profile, messages, usage, payments})
+}
+
+// deleteAIHistory removes only the signed-in user's AI messages and usage
+// records after password confirmation. Account, billing and notifications stay.
+func (s *Server) deleteAIHistory(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	if err := r.ParseForm(); err != nil || !s.validCSRF(r) {
+		http.Error(w, "Your form expired. Refresh and try again.", 400)
+		return
+	}
+	var hash string
+	if err := s.db.QueryRow(`SELECT password_hash FROM users WHERE id=$1`, u.ID).Scan(&hash); err != nil || !auth.VerifyPassword(r.FormValue("password"), hash) {
+		http.Redirect(w, r, "/settings?data=verify", http.StatusSeeOther)
+		return
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		http.Error(w, "Unable to delete AI history.", 500)
+		return
+	}
+	if _, err = tx.Exec(`DELETE FROM ai_messages WHERE user_id=$1`, u.ID); err == nil {
+		_, err = tx.Exec(`DELETE FROM ai_usage WHERE user_id=$1`, u.ID)
+	}
+	if err != nil {
+		_ = tx.Rollback()
+		http.Error(w, "Unable to delete AI history.", 500)
+		return
+	}
+	if err = tx.Commit(); err != nil {
+		http.Error(w, "Unable to complete the deletion.", 500)
+		return
+	}
+	http.Redirect(w, r, "/settings?data=history-deleted", http.StatusSeeOther)
+}
+
 func (s *Server) deleteAccount(w http.ResponseWriter, r *http.Request) {
 	u := s.currentUser(r)
 	if u == nil {
