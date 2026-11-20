@@ -178,6 +178,17 @@ CREATE TABLE IF NOT EXISTS website_projects (
  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS website_projects_user_updated_idx ON website_projects(user_id,updated_at DESC);
+CREATE TABLE IF NOT EXISTS website_project_versions (
+ id BIGSERIAL PRIMARY KEY,
+ project_id BIGINT NOT NULL REFERENCES website_projects(id) ON DELETE CASCADE,
+ user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ title TEXT NOT NULL,
+ html TEXT NOT NULL,
+ css TEXT NOT NULL DEFAULT '',
+ js TEXT NOT NULL DEFAULT '',
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS website_project_versions_idx ON website_project_versions(project_id,user_id,created_at DESC);
 ALTER TABLE ai_usage DROP CONSTRAINT IF EXISTS ai_usage_request_type_check;
 ALTER TABLE ai_usage ADD CONSTRAINT ai_usage_request_type_check CHECK (request_type IN ('chat','file_analysis','regenerate','website_build'));
 CREATE INDEX IF NOT EXISTS users_created_idx ON users(created_at DESC);

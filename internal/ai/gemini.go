@@ -61,15 +61,11 @@ func NewClient(apiKey, model string) *Client {
 	}
 }
 
-// WithTimeout returns a copy using a dedicated HTTP timeout. It is useful for
-// long-running generation tasks without slowing down normal chat requests.
-func (c *Client) WithTimeout(timeout time.Duration) *Client {
-	if c == nil || timeout <= 0 {
-		return c
+func firstEnv(key, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+		return value
 	}
-	clone := *c
-	clone.http = &http.Client{Timeout: timeout}
-	return &clone
+	return fallback
 }
 
 // ForModule returns an independent client configuration for one workspace.
@@ -83,7 +79,13 @@ func (c *Client) ForModule(module string) *Client {
 	if model == "" {
 		model = c.model
 	}
-	return &Client{apiKey: c.apiKey, model: model, fallback: c.fallback, openRouter: true, http: c.http, eventLogger: c.eventLogger}
+	timeout := 120 * time.Second
+	if module == "website" {
+		// Website generation can legitimately take longer than chat because it
+		// returns several complete frontend files in one response.
+		timeout = 420 * time.Second
+	}
+	return &Client{apiKey: c.apiKey, model: model, fallback: firstEnv("OPENROUTER_FALLBACK_MODEL_"+key, c.fallback), openRouter: true, http: &http.Client{Timeout: timeout}, eventLogger: c.eventLogger}
 }
 
 type inlineData struct {
@@ -193,8 +195,11 @@ func (c *Client) GenerateWithLimits(ctx context.Context, instruction string, his
 	}
 	body := requestBody{SystemInstruction: content{Parts: []part{{Text: instruction}}}}
 	body.GenerationConfig.Temperature = temperature
-	if maxOutputTokens < 256 || maxOutputTokens > 8192 {
+	if maxOutputTokens < 256 {
 		maxOutputTokens = 2048
+	}
+	if maxOutputTokens > 8192 {
+		maxOutputTokens = 8192
 	}
 	body.GenerationConfig.MaxOutputTokens = maxOutputTokens
 	for _, item := range history {
@@ -325,6 +330,66 @@ func (c *Client) request(ctx context.Context, model string, body requestBody) (s
 // OpenRouter uses its OpenAI-compatible Chat Completions endpoint. The same
 // client is shared by all seven workspaces, keeping provider configuration central.
 func (c *Client) openRouterGenerate(ctx context.Context, instruction string, history []Message, prompt string, maxTokens int, temperature float64, pdf []byte) (string, error) {
+	// An empty assistant message is often a provider/model failure, not a
+	// successful response. Retry it and then try the configured fallback.
+	answer, err := c.openRouterGenerateOnce(ctx, instruction, history, prompt, maxTokens, temperature, pdf)
+	if err == nil {
+		return answer, nil
+	}
+
+	if isOpenRouterRetryable(err) {
+		timer := time.NewTimer(1500 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return "", ctx.Err()
+		case <-timer.C:
+		}
+		if answer2, retryErr := c.openRouterGenerateOnce(ctx, instruction, history, prompt, maxTokens, temperature, pdf); retryErr == nil {
+			log.Printf("connectai: OpenRouter retry succeeded model=%s", c.model)
+			return answer2, nil
+		} else {
+			log.Printf("connectai: OpenRouter retry failed model=%s error=%v", c.model, retryErr)
+			err = fmt.Errorf("initial request failed (%v); retry failed: %w", err, retryErr)
+		}
+	}
+
+	fallback := strings.TrimSpace(c.fallback)
+	if fallback != "" && fallback != c.model && isOpenRouterRetryable(err) {
+		fallbackClient := *c
+		fallbackClient.model = fallback
+		log.Printf("connectai: OpenRouter primary failed model=%s; trying fallback=%s", c.model, fallback)
+		if answer2, fallbackErr := fallbackClient.openRouterGenerateOnce(ctx, instruction, history, prompt, maxTokens, temperature, pdf); fallbackErr == nil {
+			log.Printf("connectai: OpenRouter fallback succeeded primary=%s fallback=%s", c.model, fallback)
+			return answer2, nil
+		} else {
+			log.Printf("connectai: OpenRouter fallback failed primary=%s fallback=%s error=%v", c.model, fallback, fallbackErr)
+			return "", fmt.Errorf("OpenRouter primary and fallback failed: %v; %w", err, fallbackErr)
+		}
+	}
+	return "", err
+}
+
+func isOpenRouterRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"timeout", "deadline", "temporarily unavailable",
+		"returned an empty answer", "returned no answer",
+		"returned an empty message", "http 408", "http 429",
+		"http 500", "http 502", "http 503", "http 504",
+		"rate limit", "provider returned",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Client) openRouterGenerateOnce(ctx context.Context, instruction string, history []Message, prompt string, maxTokens int, temperature float64, pdf []byte) (string, error) {
 	type message struct {
 		Role    string `json:"role"`
 		Content any    `json:"content"`
@@ -334,6 +399,9 @@ func (c *Client) openRouterGenerate(ctx context.Context, instruction string, his
 		Messages    []message `json:"messages"`
 		MaxTokens   int       `json:"max_tokens"`
 		Temperature float64   `json:"temperature"`
+		Reasoning   *struct {
+			Effort string `json:"effort"`
+		} `json:"reasoning,omitempty"`
 	}
 	type contentPart struct {
 		Type string `json:"type"`
@@ -347,8 +415,16 @@ func (c *Client) openRouterGenerate(ctx context.Context, instruction string, his
 	if body.MaxTokens < 256 {
 		body.MaxTokens = 2048
 	}
-	if body.MaxTokens > 8192 {
-		body.MaxTokens = 8192
+	if body.MaxTokens > 16384 {
+		body.MaxTokens = 16384
+	}
+	// Reasoning models count their hidden thinking against max_tokens. On large
+	// outputs (website generation) that can use the whole budget and leave the
+	// answer empty with finish_reason=length, so keep reasoning light there.
+	if maxTokens >= 4096 {
+		body.Reasoning = &struct {
+			Effort string `json:"effort"`
+		}{Effort: "low"}
 	}
 	if body.Temperature < 0.1 || body.Temperature > 1.0 {
 		body.Temperature = 0.7
@@ -401,11 +477,22 @@ func (c *Client) openRouterGenerate(ctx context.Context, instruction string, his
 		return "", fmt.Errorf("read OpenRouter response: %w", err)
 	}
 	var result struct {
-		Choices []struct {
-			Message struct {
-				Content json.RawMessage `json:"content"`
+		ID       string `json:"id"`
+		Model    string `json:"model"`
+		Provider string `json:"provider"`
+		Choices  []struct {
+			FinishReason string `json:"finish_reason"`
+			Message      struct {
+				Content   json.RawMessage `json:"content"`
+				Reasoning string          `json:"reasoning"`
+				Refusal   string          `json:"refusal"`
 			} `json:"message"`
 		} `json:"choices"`
+		Usage *struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
 		Error *struct {
 			Message string `json:"message"`
 			Code    any    `json:"code"`
@@ -422,26 +509,54 @@ func (c *Client) openRouterGenerate(ctx context.Context, instruction string, his
 		return "", fmt.Errorf("OpenRouter API error (HTTP %d): %s", resp.StatusCode, msg)
 	}
 	if len(result.Choices) == 0 {
-		return "", fmt.Errorf("OpenRouter returned no answer; try again")
-	}
-	var answer string
-	if err := json.Unmarshal(result.Choices[0].Message.Content, &answer); err != nil {
-		var parts []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
+		if result.Error != nil && result.Error.Message != "" {
+			return "", fmt.Errorf("OpenRouter returned no answer: %s", result.Error.Message)
 		}
-		if json.Unmarshal(result.Choices[0].Message.Content, &parts) == nil {
-			for _, p := range parts {
-				answer += p.Text
+		return "", fmt.Errorf("OpenRouter returned no answer")
+	}
+
+	choice := result.Choices[0]
+	var answer strings.Builder
+	// Most models return content as a string. Some providers return an array
+	// of typed text parts, so support both formats.
+	if len(choice.Message.Content) > 0 && string(choice.Message.Content) != "null" {
+		if err := json.Unmarshal(choice.Message.Content, new(string)); err == nil {
+			var contentText string
+			_ = json.Unmarshal(choice.Message.Content, &contentText)
+			answer.WriteString(contentText)
+		} else {
+			var parts []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			}
+			if json.Unmarshal(choice.Message.Content, &parts) == nil {
+				for _, item := range parts {
+					if item.Type == "" || item.Type == "text" {
+						answer.WriteString(item.Text)
+					}
+				}
 			}
 		}
 	}
-	if strings.TrimSpace(answer) == "" {
-		return "", fmt.Errorf("OpenRouter returned an empty answer")
+	if strings.TrimSpace(answer.String()) == "" {
+		finish := choice.FinishReason
+		if finish == "" {
+			finish = "not supplied"
+		}
+		// Do not expose or substitute private reasoning as the assistant answer.
+		log.Printf("connectai: OpenRouter empty content model=%s response_model=%s provider=%s finish_reason=%s reasoning_present=%t response_bytes=%d",
+			c.model, result.Model, result.Provider, finish, strings.TrimSpace(choice.Message.Reasoning) != "", len(raw))
+		return "", fmt.Errorf("OpenRouter returned an empty answer (finish_reason=%s)", finish)
 	}
-	log.Printf("connectai: OpenRouter request succeeded model=%s", c.model)
+	if result.Usage != nil {
+		log.Printf("connectai: OpenRouter request succeeded model=%s response_model=%s provider=%s prompt_tokens=%d completion_tokens=%d total_tokens=%d",
+			c.model, result.Model, result.Provider, result.Usage.PromptTokens, result.Usage.CompletionTokens, result.Usage.TotalTokens)
+	} else {
+		log.Printf("connectai: OpenRouter request succeeded model=%s response_model=%s provider=%s", c.model, result.Model, result.Provider)
+	}
+
 	if c.eventLogger != nil {
 		c.eventLogger("primary_success", c.model, 0)
 	}
-	return strings.TrimSpace(answer), nil
+	return strings.TrimSpace(answer.String()), nil
 }

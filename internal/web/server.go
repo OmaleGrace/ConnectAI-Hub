@@ -73,6 +73,7 @@ type PageData struct {
 	AIModelTotals                                            map[string]int64
 	WebsiteProjects                                          []WebsiteProject
 	WebsiteProject                                           *WebsiteProject
+	WebsiteVersions                                          []WebsiteVersion
 	QuickPrompts                                             []string
 	User                                                     *User
 }
@@ -80,6 +81,11 @@ type SavedPrompt struct {
 	ID                        int64
 	Title, ModuleSlug, Prompt string
 	CreatedAt                 time.Time
+}
+type WebsiteVersion struct {
+	ID        int64
+	CreatedAt time.Time
+	Title     string
 }
 type WebsiteProject struct {
 	ID                           int64
@@ -259,6 +265,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/modules/{slug}/analyze", s.analyzeUpload)
 	s.mux.HandleFunc("GET /builder", s.websiteBuilderPage)
 	s.mux.HandleFunc("POST /builder/generate", s.generateWebsite)
+	s.mux.HandleFunc("POST /builder/projects/{id}/edit", s.editWebsiteProject)
+	s.mux.HandleFunc("POST /builder/projects/{id}/save", s.saveWebsiteProject)
+	s.mux.HandleFunc("POST /builder/projects/{id}/qa", s.checkWebsiteProject)
+	s.mux.HandleFunc("POST /builder/projects/{id}/restore/{version}", s.restoreWebsiteProject)
 	s.mux.HandleFunc("GET /builder/projects/{id}", s.websiteProjectPage)
 	s.mux.HandleFunc("POST /builder/projects/{id}/delete", s.deleteWebsiteProject)
 	s.mux.HandleFunc("GET /builder/projects/{id}/download", s.downloadWebsiteProject)
@@ -406,7 +416,7 @@ func (s *Server) websiteBuilderPage(w http.ResponseWriter, r *http.Request) {
 	}
 	var unread int64
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM notifications WHERE user_id=$1 AND is_read=FALSE`, u.ID).Scan(&unread)
-	s.render(w, "builder.html", PageData{Title: "AI Website Builder", Active: "builder", User: u, CSRF: s.csrf(w, r), WebsiteProjects: projects, UnreadNotifications: unread, BuilderPrompt: r.URL.Query().Get("prompt"), Success: r.URL.Query().Get("success"), Error: r.URL.Query().Get("error")})
+	s.render(w, "builder.html", PageData{Title: "AI Website Builder", Active: "builder", User: u, CSRF: s.csrf(w, r), WebsiteProjects: projects, BuilderPrompt: r.URL.Query().Get("prompt"), UnreadNotifications: unread, Success: r.URL.Query().Get("success"), Error: firstNonEmpty(r.URL.Query().Get("error"), r.URL.Query().Get("clarify"))})
 }
 
 func (s *Server) generateWebsite(w http.ResponseWriter, r *http.Request) {
@@ -421,7 +431,7 @@ func (s *Server) generateWebsite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	prompt := strings.TrimSpace(r.FormValue("prompt"))
-	if len(prompt) < 20 || len(prompt) > 8000 {
+	if len(prompt) < 5 || len(prompt) > 8000 {
 		http.Redirect(w, r, "/builder?error=Please+write+a+website+description+between+20+and+8000+characters.", http.StatusSeeOther)
 		return
 	}
@@ -442,38 +452,31 @@ func (s *Server) generateWebsite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Ask the selected website model to assess the brief before spending tokens on code.
-	// A short, specific brief is allowed when its purpose and core page are clear.
-	assessmentInstruction := `You assess website briefs. Decide whether the brief contains enough information to build a useful first version. A brief is READY if it identifies a website purpose or type, even if some design details are missing; use sensible defaults for optional details. It is NOT READY only when the purpose/site type is unclear or essential information is missing. Return ONLY JSON: {"ready":true|false,"message":"short helpful explanation","questions":["one concise question","optional second question"]}. Never ask for optional color/font choices when you can choose sensible defaults.`
-	preflightCtx, preflightCancel := context.WithTimeout(r.Context(), 35*time.Second)
-	assessment, assessmentErr := s.gemini.ForModule("website").WithTimeout(35*time.Second).GenerateWithLimits(preflightCtx, assessmentInstruction, nil, prompt, 0.2, 350)
-	preflightCancel()
+	// Ask the selected workspace model to identify only genuinely blocking ambiguity.
+	assessmentCtx, assessmentCancel := context.WithTimeout(r.Context(), 35*time.Second)
+	assessmentPrompt := `Assess this website brief. If it is too vague to build a useful website, return exactly JSON {"ready":false,"questions":["..."],"reason":"..."}. Ask at most 3 short, essential questions. A brief is ready if its website type and purpose are reasonably inferable; do not demand optional details. If ready, return {"ready":true,"questions":[],"reason":""}. Brief: ` + prompt
+	assessment, assessmentErr := s.gemini.ForModule("website").GenerateWithLimits(assessmentCtx, "You assess website briefs. Return JSON only.", nil, assessmentPrompt, 0.1, 500)
+	assessmentCancel()
 	if assessmentErr == nil {
-		var review struct {
+		var verdict struct {
 			Ready     bool     `json:"ready"`
-			Message   string   `json:"message"`
 			Questions []string `json:"questions"`
+			Reason    string   `json:"reason"`
 		}
-		cleanReview := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(assessment), "```json"), "```"))
-		if json.Unmarshal([]byte(cleanReview), &review) == nil && !review.Ready {
-			msg := strings.TrimSpace(review.Message)
-			if msg == "" {
-				msg = "I need a little more detail before I can build this website."
+		cleanAssessment := extractJSONObject(assessment)
+		if json.Unmarshal([]byte(cleanAssessment), &verdict) == nil && !verdict.Ready {
+			message := strings.Join(verdict.Questions, "\n• ")
+			if message == "" {
+				message = verdict.Reason
 			}
-			if len(review.Questions) > 0 {
-				msg += " Please clarify: " + strings.Join(review.Questions[:min(len(review.Questions), 3)], " ")
-			}
-			http.Redirect(w, r, "/builder?error="+url.QueryEscape(msg)+"&prompt="+url.QueryEscape(prompt), http.StatusSeeOther)
+			http.Redirect(w, r, "/builder?clarify="+url.QueryEscape(message)+"&prompt="+url.QueryEscape(prompt), http.StatusSeeOther)
 			return
 		}
-	} else {
-		log.Printf("connectai: website brief assessment skipped user_id=%d error=%v", u.ID, assessmentErr)
 	}
-
 	instruction := `You are a senior web designer and frontend developer. Build a polished, responsive, accessible website from the user's brief. Return ONLY valid JSON with exactly these string keys: title, html, css, js. html must contain only the body markup (no html/head/body tags); css must be standalone CSS; js must be vanilla JavaScript. Do not include markdown fences. Do not use external libraries, remote scripts, trackers, forms that submit to unknown endpoints, or requests to external services. Do not include secrets. Make all navigation internal anchors where possible. Use semantic HTML, responsive layout, accessible labels, keyboard-friendly controls, realistic placeholder copy, and a coherent visual design. Keep code compact enough to fit the output limit.`
-	ctx, cancel := context.WithTimeout(r.Context(), 240*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 420*time.Second)
 	defer cancel()
-	output, err := s.gemini.ForModule("website").WithTimeout(240*time.Second).GenerateWithLimits(ctx, instruction, nil, prompt, 0.55, 6500)
+	output, err := s.gemini.ForModule("website").GenerateWithLimits(ctx, instruction, nil, prompt, 0.45, 16384)
 	if err != nil {
 		log.Printf("connectai: website generation failed user_id=%d error=%v", u.ID, err)
 		http.Redirect(w, r, "/builder?error=The+AI+builder+could+not+finish+this+website.+Please+try+a+shorter+brief.", http.StatusSeeOther)
@@ -485,10 +488,7 @@ func (s *Server) generateWebsite(w http.ResponseWriter, r *http.Request) {
 		CSS   string `json:"css"`
 		JS    string `json:"js"`
 	}
-	clean := strings.TrimSpace(output)
-	clean = strings.TrimPrefix(clean, "```json")
-	clean = strings.TrimPrefix(clean, "```")
-	clean = strings.TrimSuffix(clean, "```")
+	clean := extractJSONObject(output)
 	if err := json.Unmarshal([]byte(strings.TrimSpace(clean)), &generated); err != nil {
 		log.Printf("connectai: website generation returned invalid JSON user_id=%d", u.ID)
 		http.Redirect(w, r, "/builder?error=The+AI+returned+an+incomplete+website.+Please+try+again.", http.StatusSeeOther)
@@ -512,6 +512,259 @@ func (s *Server) generateWebsite(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, fmt.Sprintf("/builder/projects/%d", id), http.StatusSeeOther)
 }
 
+func extractJSONObject(raw string) string {
+	raw = strings.TrimSpace(strings.TrimPrefix(strings.TrimSuffix(raw, "```"), "```json"))
+	start := strings.Index(raw, "{")
+	if start < 0 {
+		return raw
+	}
+	depth := 0
+	inString := false
+	escaped := false
+	for i := start; i < len(raw); i++ {
+		ch := raw[i]
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == '"' {
+				inString = false
+			}
+			continue
+		}
+		if ch == '"' {
+			inString = true
+			continue
+		}
+		if ch == '{' {
+			depth++
+		}
+		if ch == '}' {
+			depth--
+			if depth == 0 {
+				return raw[start : i+1]
+			}
+		}
+	}
+	return raw[start:]
+}
+
+func (s *Server) loadOwnedWebsite(r *http.Request, u *User) (WebsiteProject, error) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		return WebsiteProject{}, err
+	}
+	var p WebsiteProject
+	err = s.db.QueryRow(`SELECT id,title,prompt,html,css,js,created_at,updated_at FROM website_projects WHERE id=$1 AND user_id=$2`, id, u.ID).Scan(&p.ID, &p.Title, &p.Prompt, &p.HTML, &p.CSS, &p.JS, &p.CreatedAt, &p.UpdatedAt)
+	return p, err
+}
+
+func (s *Server) editWebsiteProject(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		http.Error(w, "Unauthorized", 401)
+		return
+	}
+	if !s.validCSRF(r) {
+		http.Error(w, "Invalid form token", 403)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "Invalid request", 400)
+		return
+	}
+	instruction := strings.TrimSpace(r.FormValue("instruction"))
+	if len(instruction) < 4 || len(instruction) > 4000 {
+		http.Error(w, "Describe the change in 4–4,000 characters.", 400)
+		return
+	}
+	if !s.allowRate("builder-edit:"+fmt.Sprint(u.ID), 8, 10*time.Minute) {
+		http.Error(w, "Please wait before making more edits.", 429)
+		return
+	}
+	p, err := s.loadOwnedWebsite(r, u)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 420*time.Second)
+	defer cancel()
+	prompt := `Update this existing website according to the user's instruction. Preserve unrelated content and existing design. Return ONLY valid JSON with string keys title, html, css, js. html is body markup only. Do not add external libraries or network calls. Existing project JSON: ` + mustJSON(map[string]string{"title": p.Title, "html": p.HTML, "css": p.CSS, "js": p.JS}) + ` User change: ` + instruction
+	out, err := s.gemini.ForModule("website").GenerateWithLimits(ctx, "You are an expert frontend engineer making a focused patch to an existing website. Return complete updated files as JSON.", nil, prompt, 0.35, 16384)
+	if err != nil {
+		http.Error(w, "The edit took too long or the AI provider failed. Your existing version is unchanged; try a smaller change.", 502)
+		return
+	}
+	var next struct{ Title, HTML, CSS, JS string }
+	if err = json.Unmarshal([]byte(extractJSONObject(out)), &next); err != nil || strings.TrimSpace(next.HTML) == "" {
+		http.Error(w, "The AI returned an incomplete edit. Your existing version is unchanged.", 502)
+		return
+	}
+	if len(next.HTML) > 90000 || len(next.CSS) > 60000 || len(next.JS) > 30000 {
+		http.Error(w, "The updated website is too large. Try a smaller edit.", 413)
+		return
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		http.Error(w, "Unable to save version", 500)
+		return
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(`INSERT INTO website_project_versions(project_id,user_id,title,html,css,js) VALUES($1,$2,$3,$4,$5,$6)`, p.ID, u.ID, p.Title, p.HTML, p.CSS, p.JS)
+	if err != nil {
+		http.Error(w, "Unable to preserve previous version", 500)
+		return
+	}
+	title := strings.TrimSpace(next.Title)
+	if title == "" {
+		title = p.Title
+	}
+	_, err = tx.Exec(`UPDATE website_projects SET title=$1,html=$2,css=$3,js=$4,updated_at=NOW() WHERE id=$5 AND user_id=$6`, title, next.HTML, next.CSS, next.JS, p.ID, u.ID)
+	if err != nil {
+		http.Error(w, "Unable to save edit", 500)
+		return
+	}
+	if err = tx.Commit(); err != nil {
+		http.Error(w, "Unable to save edit", 500)
+		return
+	}
+	http.Redirect(w, r, fmt.Sprintf("/builder/projects/%d?success=Changes+saved", p.ID), http.StatusSeeOther)
+}
+
+func (s *Server) saveWebsiteProject(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		http.Error(w, "Unauthorized", 401)
+		return
+	}
+	if !s.validCSRF(r) {
+		http.Error(w, "Invalid form token", 403)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 200<<10)
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "Invalid request", 400)
+		return
+	}
+	p, err := s.loadOwnedWebsite(r, u)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	html, css, js := r.FormValue("html"), r.FormValue("css"), r.FormValue("js")
+	if strings.TrimSpace(html) == "" || len(html) > 90000 || len(css) > 60000 || len(js) > 30000 {
+		http.Error(w, "Invalid or oversized website source", 400)
+		return
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		http.Error(w, "Unable to save", 500)
+		return
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`INSERT INTO website_project_versions(project_id,user_id,title,html,css,js) VALUES($1,$2,$3,$4,$5,$6)`, p.ID, u.ID, p.Title, p.HTML, p.CSS, p.JS); err != nil {
+		http.Error(w, "Unable to preserve version", 500)
+		return
+	}
+	if _, err = tx.Exec(`UPDATE website_projects SET html=$1,css=$2,js=$3,updated_at=NOW() WHERE id=$4 AND user_id=$5`, html, css, js, p.ID, u.ID); err != nil {
+		http.Error(w, "Unable to save", 500)
+		return
+	}
+	if err = tx.Commit(); err != nil {
+		http.Error(w, "Unable to save", 500)
+		return
+	}
+	http.Redirect(w, r, fmt.Sprintf("/builder/projects/%d?success=Source+saved", p.ID), 303)
+}
+
+func (s *Server) restoreWebsiteProject(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		http.Error(w, "Unauthorized", 401)
+		return
+	}
+	if !s.validCSRF(r) {
+		http.Error(w, "Invalid form token", 403)
+		return
+	}
+	p, err := s.loadOwnedWebsite(r, u)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	version, err := strconv.ParseInt(r.PathValue("version"), 10, 64)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	var title, html, css, js string
+	err = s.db.QueryRow(`SELECT title,html,css,js FROM website_project_versions WHERE id=$1 AND project_id=$2 AND user_id=$3`, version, p.ID, u.ID).Scan(&title, &html, &css, &js)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		http.Error(w, "Unable to restore", 500)
+		return
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`INSERT INTO website_project_versions(project_id,user_id,title,html,css,js) VALUES($1,$2,$3,$4,$5,$6)`, p.ID, u.ID, p.Title, p.HTML, p.CSS, p.JS); err != nil {
+		http.Error(w, "Unable to preserve current version", 500)
+		return
+	}
+	if _, err = tx.Exec(`UPDATE website_projects SET title=$1,html=$2,css=$3,js=$4,updated_at=NOW() WHERE id=$5 AND user_id=$6`, title, html, css, js, p.ID, u.ID); err != nil {
+		http.Error(w, "Unable to restore", 500)
+		return
+	}
+	if err = tx.Commit(); err != nil {
+		http.Error(w, "Unable to restore", 500)
+		return
+	}
+	http.Redirect(w, r, fmt.Sprintf("/builder/projects/%d?success=Previous+version+restored", p.ID), 303)
+}
+
+func (s *Server) checkWebsiteProject(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		http.Error(w, "Unauthorized", 401)
+		return
+	}
+	if !s.validCSRF(r) {
+		http.Error(w, "Invalid form token", 403)
+		return
+	}
+	p, err := s.loadOwnedWebsite(r, u)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer cancel()
+	prompt := `Review this website source for likely HTML/CSS/JavaScript bugs, accessibility, responsiveness, broken navigation and security risks. Do not rewrite it. Return concise findings grouped into Critical, Important and Suggestions. If none, say so. Source: ` + mustJSON(map[string]string{"html": p.HTML, "css": p.CSS, "js": p.JS})
+	report, err := s.gemini.ForModule("website").GenerateWithLimits(ctx, "You are a careful frontend quality reviewer. Be specific and do not claim to execute code.", nil, prompt, 0.2, 1800)
+	if err != nil {
+		http.Error(w, "The quality review could not finish. Try again later.", 502)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write([]byte(report))
+}
+
+func mustJSON(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
+}
+
 func (s *Server) websiteProjectPage(w http.ResponseWriter, r *http.Request) {
 	u := s.currentUser(r)
 	if u == nil {
@@ -531,7 +784,18 @@ func (s *Server) websiteProjectPage(w http.ResponseWriter, r *http.Request) {
 	}
 	var unread int64
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM notifications WHERE user_id=$1 AND is_read=FALSE`, u.ID).Scan(&unread)
-	s.render(w, "builder-project.html", PageData{Title: p.Title, Active: "builder", User: u, CSRF: s.csrf(w, r), WebsiteProject: &p, UnreadNotifications: unread})
+	versions := []WebsiteVersion{}
+	rows, _ := s.db.Query(`SELECT id,title,created_at FROM website_project_versions WHERE project_id=$1 AND user_id=$2 ORDER BY created_at DESC LIMIT 20`, p.ID, u.ID)
+	if rows != nil {
+		defer rows.Close()
+		for rows.Next() {
+			var v WebsiteVersion
+			if rows.Scan(&v.ID, &v.Title, &v.CreatedAt) == nil {
+				versions = append(versions, v)
+			}
+		}
+	}
+	s.render(w, "builder-project.html", PageData{Title: p.Title, Active: "builder", User: u, CSRF: s.csrf(w, r), WebsiteProject: &p, WebsiteVersions: versions, UnreadNotifications: unread, Success: r.URL.Query().Get("success")})
 }
 
 func (s *Server) deleteWebsiteProject(w http.ResponseWriter, r *http.Request) {

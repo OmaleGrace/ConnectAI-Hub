@@ -415,3 +415,12 @@ Workspace routing is configured independently per request (it does not mutate th
 - `APP_BASE_URL`: optional application attribution URL sent with OpenRouter requests.
 
 When `OPENROUTER_API_KEY` is present, OpenRouter is selected automatically. If it is absent, the existing Gemini configuration is used. OpenRouter requests use its Chat Completions endpoint; PDF uploads are sent as base64 PDF file content. Model availability, context size, multimodal support and pricing vary by model. Never commit `.env` or expose API keys in browser JavaScript.
+
+
+## Website Builder upgrades
+
+The Website Builder now includes: AI brief assessment (asks concise clarification questions for genuinely vague briefs), starter brief templates, a longer website-generation/edit timeout, transient OpenRouter retry and configured fallback, JSON extraction, responsive desktop/tablet/mobile preview controls, limited inline visual text editing, direct HTML/CSS/JS source editing, AI-assisted focused edits, AI source review, ZIP export, and project version snapshots/restore.
+
+OpenRouter workspace model overrides remain optional. Set `OPENROUTER_MODEL_WEBSITE` for the primary website model, `OPENROUTER_FALLBACK_MODEL` for a shared fallback, or `OPENROUTER_FALLBACK_MODEL_WEBSITE` for a website-only fallback. Website generation/edit calls allow up to 420 seconds at the application context level; individual OpenRouter attempts are bounded separately and may retry once before trying the configured fallback.
+
+The visual editor currently supports inline text edits in the preview; structural layout changes are made through the AI edit assistant or source editor. Website publishing/custom-domain deployment is not enabled by this package: users can download the static website ZIP and deploy it with a hosting provider. AI quality review is advisory and does not execute the generated website or guarantee security.
