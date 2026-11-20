@@ -64,3 +64,22 @@
 .builder-code-grid pre{max-height:360px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-size:.78rem;line-height:1.55}
 .builder-safety-note{margin:24px 0}
 @media(max-width:850px){.builder-code-grid{grid-template-columns:1fr}.builder-preview-card iframe{height:560px}.builder-form-footer{align-items:flex-start}}
+
+/* Navigation refresh: fewer top-level choices, grouped secondary destinations. */
+.topbar{height:74px;gap:22px;padding-inline:max(22px,calc((100vw - 1240px)/2))}
+.nav-links{align-items:center;gap:clamp(12px,1.7vw,25px);font-size:12px;white-space:nowrap}
+.nav-links>a,.nav-more summary{transition:color .18s ease}
+.nav-links>a.active{color:#fff;position:relative}
+.nav-links>a.active:after{content:"";position:absolute;left:0;right:0;bottom:-9px;height:2px;border-radius:3px;background:linear-gradient(90deg,#a88aff,#72c8f5)}
+.nav-more{position:relative;color:var(--muted);font-size:12px}
+.nav-more summary{list-style:none;cursor:pointer;padding:8px 2px}
+.nav-more summary::-webkit-details-marker{display:none}
+.nav-more summary span{color:#a99aff;margin-left:4px}
+.nav-more[open] summary,.nav-more summary:hover{color:var(--text)}
+.nav-more-menu{position:absolute;top:calc(100% + 13px);right:-12px;min-width:190px;padding:8px;border:1px solid var(--line);border-radius:13px;background:#11182a;box-shadow:0 18px 45px #0007;display:grid;gap:3px;z-index:50}
+.nav-more-menu a{padding:10px 12px;border-radius:8px;color:#bdc7dc}
+.nav-more-menu a:hover,.nav-more-menu a.active{background:#ffffff0d;color:white}
+.nav-actions{gap:14px;font-size:12px;white-space:nowrap}
+.nav-greeting{max-width:125px;overflow:hidden;text-overflow:ellipsis}
+@media(max-width:900px) and (min-width:651px){.topbar{padding-inline:18px;gap:12px}.brand{font-size:14px}.nav-links{gap:10px;font-size:11px}.nav-actions{gap:9px}.nav-greeting{display:none}}
+@media(max-width:650px){.topbar{height:68px;padding:0 16px;gap:8px}.nav-links{top:68px;gap:8px;padding:14px 18px}.nav-links>a,.nav-more summary,.tour-nav-button{padding:10px 8px;font-size:13px}.nav-links>a.active:after{display:none}.nav-more-menu{position:static;box-shadow:none;margin:4px 0 5px 10px;background:#0c1323}.nav-more{width:100%}.nav-more summary{display:block}.nav-actions{margin-left:4px}.nav-actions .logout-form{display:none}}

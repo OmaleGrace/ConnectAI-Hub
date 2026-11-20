@@ -25,12 +25,27 @@ type Client struct {
 	apiKey      string
 	model       string
 	fallback    string
+	openRouter  bool
 	http        *http.Client
 }
 
 // NewClient creates a Gemini client. GEMINI_FALLBACK_MODEL can override the
 // default fallback model without changing application code.
 func NewClient(apiKey, model string) *Client {
+	openRouterKey := strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY"))
+	if openRouterKey != "" {
+		orModel := strings.TrimSpace(os.Getenv("OPENROUTER_MODEL"))
+		if orModel == "" {
+			orModel = "openrouter/auto"
+		}
+		return &Client{
+			apiKey:     openRouterKey,
+			model:      orModel,
+			fallback:   strings.TrimSpace(os.Getenv("OPENROUTER_FALLBACK_MODEL")),
+			openRouter: true,
+			http:       &http.Client{Timeout: 90 * time.Second},
+		}
+	}
 	if model == "" {
 		model = "gemini-3.5-flash"
 	}
@@ -44,6 +59,31 @@ func NewClient(apiKey, model string) *Client {
 		fallback: fallback,
 		http:     &http.Client{Timeout: 75 * time.Second},
 	}
+}
+
+// WithTimeout returns a copy using a dedicated HTTP timeout. It is useful for
+// long-running generation tasks without slowing down normal chat requests.
+func (c *Client) WithTimeout(timeout time.Duration) *Client {
+	if c == nil || timeout <= 0 {
+		return c
+	}
+	clone := *c
+	clone.http = &http.Client{Timeout: timeout}
+	return &clone
+}
+
+// ForModule returns an independent client configuration for one workspace.
+// Environment overrides are optional and never mutate the shared client.
+func (c *Client) ForModule(module string) *Client {
+	if c == nil || !c.openRouter {
+		return c
+	}
+	key := strings.ToUpper(strings.NewReplacer("-", "_", " ", "_").Replace(module))
+	model := strings.TrimSpace(os.Getenv("OPENROUTER_MODEL_" + key))
+	if model == "" {
+		model = c.model
+	}
+	return &Client{apiKey: c.apiKey, model: model, fallback: c.fallback, openRouter: true, http: c.http, eventLogger: c.eventLogger}
 }
 
 type inlineData struct {
@@ -106,8 +146,11 @@ func (c *Client) record(eventType, model string, started time.Time) {
 
 // GenerateWithPDF sends a PDF as Gemini inline data. The caller enforces upload limits.
 func (c *Client) GenerateWithPDF(ctx context.Context, instruction string, history []Message, prompt string, pdf []byte) (string, error) {
+	if c.openRouter {
+		return c.openRouterGenerate(ctx, instruction, history, prompt, 2048, 0.4, pdf)
+	}
 	if c.apiKey == "" {
-		return "", fmt.Errorf("Gemini is not configured: GEMINI_API_KEY is missing")
+		return "", fmt.Errorf("AI provider is not configured: set OPENROUTER_API_KEY or GEMINI_API_KEY")
 	}
 	body := requestBody{SystemInstruction: content{Parts: []part{{Text: instruction}}}}
 	body.GenerationConfig.Temperature = 0.4
@@ -139,8 +182,11 @@ func (c *Client) GenerateWithTemperature(ctx context.Context, instruction string
 
 // GenerateWithLimits allows larger structured outputs for tasks such as website generation.
 func (c *Client) GenerateWithLimits(ctx context.Context, instruction string, history []Message, prompt string, temperature float64, maxOutputTokens int) (string, error) {
+	if c.openRouter {
+		return c.openRouterGenerate(ctx, instruction, history, prompt, maxOutputTokens, temperature, nil)
+	}
 	if c.apiKey == "" {
-		return "", fmt.Errorf("Gemini is not configured: GEMINI_API_KEY is missing")
+		return "", fmt.Errorf("AI provider is not configured: set OPENROUTER_API_KEY or GEMINI_API_KEY")
 	}
 	if temperature < 0.1 || temperature > 1.0 {
 		temperature = 0.7
@@ -274,4 +320,128 @@ func (c *Client) request(ctx context.Context, model string, body requestBody) (s
 		return "", fmt.Errorf("Gemini returned an empty response")
 	}
 	return strings.TrimSpace(answer.String()), nil
+}
+
+// OpenRouter uses its OpenAI-compatible Chat Completions endpoint. The same
+// client is shared by all seven workspaces, keeping provider configuration central.
+func (c *Client) openRouterGenerate(ctx context.Context, instruction string, history []Message, prompt string, maxTokens int, temperature float64, pdf []byte) (string, error) {
+	type message struct {
+		Role    string `json:"role"`
+		Content any    `json:"content"`
+	}
+	type request struct {
+		Model       string    `json:"model"`
+		Messages    []message `json:"messages"`
+		MaxTokens   int       `json:"max_tokens"`
+		Temperature float64   `json:"temperature"`
+	}
+	type contentPart struct {
+		Type string `json:"type"`
+		Text string `json:"text,omitempty"`
+		File *struct {
+			Filename string `json:"filename"`
+			FileData string `json:"file_data"`
+		} `json:"file,omitempty"`
+	}
+	body := request{Model: c.model, MaxTokens: maxTokens, Temperature: temperature}
+	if body.MaxTokens < 256 {
+		body.MaxTokens = 2048
+	}
+	if body.MaxTokens > 8192 {
+		body.MaxTokens = 8192
+	}
+	if body.Temperature < 0.1 || body.Temperature > 1.0 {
+		body.Temperature = 0.7
+	}
+	if strings.TrimSpace(instruction) != "" {
+		body.Messages = append(body.Messages, message{Role: "system", Content: instruction})
+	}
+	for _, item := range history {
+		role := item.Role
+		if role == "model" {
+			role = "assistant"
+		}
+		if role != "user" && role != "assistant" {
+			continue
+		}
+		if strings.TrimSpace(item.Text) != "" {
+			body.Messages = append(body.Messages, message{Role: role, Content: item.Text})
+		}
+	}
+	if len(pdf) > 0 {
+		data := "data:application/pdf;base64," + base64.StdEncoding.EncodeToString(pdf)
+		part := contentPart{Type: "file"}
+		part.File = &struct {
+			Filename string `json:"filename"`
+			FileData string `json:"file_data"`
+		}{Filename: "uploaded-document.pdf", FileData: data}
+		body.Messages = append(body.Messages, message{Role: "user", Content: []contentPart{{Type: "text", Text: prompt}, part}})
+	} else {
+		body.Messages = append(body.Messages, message{Role: "user", Content: prompt})
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return "", fmt.Errorf("prepare OpenRouter request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://openrouter.ai/api/v1/chat/completions", bytes.NewReader(payload))
+	if err != nil {
+		return "", fmt.Errorf("create OpenRouter request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("HTTP-Referer", strings.TrimSpace(os.Getenv("APP_BASE_URL")))
+	req.Header.Set("X-OpenRouter-Title", "ConnectAI Hub")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("contact OpenRouter: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return "", fmt.Errorf("read OpenRouter response: %w", err)
+	}
+	var result struct {
+		Choices []struct {
+			Message struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+		Error *struct {
+			Message string `json:"message"`
+			Code    any    `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return "", fmt.Errorf("OpenRouter returned an unreadable response (HTTP %d)", resp.StatusCode)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		msg := http.StatusText(resp.StatusCode)
+		if result.Error != nil && result.Error.Message != "" {
+			msg = result.Error.Message
+		}
+		return "", fmt.Errorf("OpenRouter API error (HTTP %d): %s", resp.StatusCode, msg)
+	}
+	if len(result.Choices) == 0 {
+		return "", fmt.Errorf("OpenRouter returned no answer; try again")
+	}
+	var answer string
+	if err := json.Unmarshal(result.Choices[0].Message.Content, &answer); err != nil {
+		var parts []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(result.Choices[0].Message.Content, &parts) == nil {
+			for _, p := range parts {
+				answer += p.Text
+			}
+		}
+	}
+	if strings.TrimSpace(answer) == "" {
+		return "", fmt.Errorf("OpenRouter returned an empty answer")
+	}
+	log.Printf("connectai: OpenRouter request succeeded model=%s", c.model)
+	if c.eventLogger != nil {
+		c.eventLogger("primary_success", c.model, 0)
+	}
+	return strings.TrimSpace(answer), nil
 }

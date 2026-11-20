@@ -2,7 +2,7 @@
 
 ### One Hub. Endless Possibilities.
 
-ConnectAI Hub is an all-in-one AI-powered platform that brings multiple intelligent tools together in one workspace. It helps users learn, build, analyse information, manage business tasks and improve productivity using Google's Gemini AI.
+ConnectAI Hub is an all-in-one AI-powered platform that brings multiple intelligent tools together in one workspace. It helps users learn, build, analyse information, manage business tasks and improve productivity using configurable AI models through OpenRouter or Google Gemini.
 
 Instead of switching between different AI platforms for different tasks, users can access seven specialised AI assistants from a single account.
 
@@ -119,7 +119,9 @@ Apply `migrations/004_user_profiles.sql` if your deployment does not run the aut
 - Go HTML templates
 
 **AI Integration**
-- Google Gemini API
+- OpenRouter Chat Completions API (preferred when `OPENROUTER_API_KEY` is set)
+- Google Gemini API (used when OpenRouter is not configured)
+- Central provider client shared by all seven workspaces
 
 **Database Hosting**
 - Neon PostgreSQL
@@ -171,7 +173,7 @@ ConnectAI-Hub/
 
 - Go installed.
 - A PostgreSQL database.
-- A Google Gemini API key.
+- An OpenRouter API key or a Google Gemini API key.
 - Git.
 
 ### 1. Clone the repository
@@ -217,7 +219,7 @@ The application connects to the configured PostgreSQL database and manages its r
 - Authentication sessions are managed using secure tokens.
 - API credentials are stored in environment variables.
 - Uploaded documents are processed in memory rather than permanently stored by the application.
-- Uploaded documents are sent to Google Gemini for analysis. Avoid uploading sensitive or confidential information.
+- Uploaded documents are sent to the configured AI provider (OpenRouter or Gemini) for analysis. Avoid uploading sensitive or confidential information.
 
 ## 👤 Account Settings and Usage (Batch 7)
 
@@ -399,3 +401,17 @@ Users can describe a website in natural language and generate a saved project co
 - The preview is sandboxed and does not grant same-origin access.
 - Generated projects are not automatically hosted or published; users must review and deploy them separately.
 - No new environment variables are required. The `website_projects` table and usage constraint update are applied at startup.
+
+## AI provider configuration
+
+ConnectAI Hub uses one shared Go AI client for all seven modules and the Website Builder. Configure OpenRouter in the deployment environment:
+
+- `OPENROUTER_API_KEY`: your private OpenRouter API key.
+- `OPENROUTER_MODEL`: optional model slug; defaults to `openrouter/auto`.
+- `OPENROUTER_FALLBACK_MODEL`: optional second-choice model slug. When configured, OpenRouter receives the primary and fallback model list in order.
+- Optional workspace-specific overrides: `OPENROUTER_MODEL_STUDY`, `OPENROUTER_MODEL_CAREER`, `OPENROUTER_MODEL_BUSINESS`, `OPENROUTER_MODEL_DOCUMENTS`, `OPENROUTER_MODEL_WEBSITE`, `OPENROUTER_MODEL_SUPPORT`, and `OPENROUTER_MODEL_DATA`. Each blank value inherits `OPENROUTER_MODEL`.
+
+Workspace routing is configured independently per request (it does not mutate the shared provider client), so simultaneous users can safely use different workspace model settings. Choose model slugs from the OpenRouter model catalogue and verify each model's context length, tool/JSON support, and pricing before assigning it to a workspace.
+- `APP_BASE_URL`: optional application attribution URL sent with OpenRouter requests.
+
+When `OPENROUTER_API_KEY` is present, OpenRouter is selected automatically. If it is absent, the existing Gemini configuration is used. OpenRouter requests use its Chat Completions endpoint; PDF uploads are sent as base64 PDF file content. Model availability, context size, multimodal support and pricing vary by model. Never commit `.env` or expose API keys in browser JavaScript.
