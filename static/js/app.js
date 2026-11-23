@@ -85,7 +85,7 @@ document.addEventListener("DOMContentLoaded", () => {
           body:JSON.stringify({csrf_token:csrf})
         });
         if(!response.ok) throw new Error(await response.text()||"Unable to clear conversation.");
-        box.innerHTML=`<div class="chat-empty" id="chatEmpty"><span>✦</span><b>Your conversation starts here.</b><p>Ask a question or describe what you'd like help with.</p></div>`;
+        box.innerHTML=`<div class="chat-empty" id="chatEmpty"><span>✦</span><b>${escapeHTML(box.dataset.emptyTitle||"Your conversation starts here.")}</b><p>${escapeHTML(box.dataset.emptyText||"Ask a question or describe what you would like help with.")}</p></div>`;
         errorBox.hidden=true;
       }catch(err){errorBox.textContent=err.message||"Unable to clear conversation.";errorBox.hidden=false;}
       finally{clearButton.disabled=false;}

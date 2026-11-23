@@ -1,8 +1,8 @@
 /* ConnectAI Hub PWA worker. Keep installation lightweight: do not wait for a
    large cache.addAll() request before the browser can finish installing. */
-const CACHE_NAME = "connectai-shell-v23";
+const CACHE_NAME = "connectai-shell-v26";
 const STATIC_ASSETS = [
-  "/static/css/app.css", "/static/css/auth.css", "/static/css/chat.css",
+  "/static/css/app.css", "/static/css/auth.css", "/static/css/chat.css", "/static/css/redesign.css", "/static/css/studio.css",
   "/static/js/app.js", "/static/manifest.webmanifest",
   "/static/icons/icon-192.png", "/static/icons/icon-512.png"
 ];
@@ -13,7 +13,7 @@ self.addEventListener("install", (event) => {
 self.addEventListener("activate", (event) => {
   event.waitUntil((async () => {
     const keys = await caches.keys();
-    await Promise.all(keys.filter((key) => key.startsWith("connectai-static-") && key !== CACHE_NAME).map((key) => caches.delete(key)));
+    await Promise.all(keys.filter((key) => (key.startsWith("connectai-shell-") || key.startsWith("connectai-static-")) && key !== CACHE_NAME).map((key) => caches.delete(key)));
     await self.clients.claim();
   })());
 });
