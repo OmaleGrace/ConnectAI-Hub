@@ -1,8 +1,8 @@
 /* ConnectAI Hub service worker: pre-caches the app shell, serves static files
    stale-while-revalidate, and shows a friendly page when a navigation fails offline. */
-const CACHE = "connectai-shell-v2";
+const CACHE = "connectai-shell-v3";
 const SHELL = [
-  "/static/css/app.css?v=21", "/static/js/app.js?v=21", "/static/manifest.webmanifest",
+  "/static/css/app.css?v=22", "/static/js/app.js?v=22", "/static/manifest.webmanifest",
   "/static/icons/mark.svg", "/static/icons/icon-192.png", "/static/icons/icon-512.png"
 ];
 const OFFLINE = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Offline · ConnectAI Hub</title><body style="font:16px system-ui;display:grid;place-items:center;min-height:100vh;margin:0;background:#faf7f2;color:#1c1917;text-align:center"><div><h1 style="font-family:Georgia,serif">You’re offline</h1><p>ConnectAI Hub needs a connection to reach your assistants. Check your network and try again.</p><p><a href="/" style="color:#d9480f">Retry</a></p></div>`;

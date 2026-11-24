@@ -190,7 +190,7 @@ CREATE TABLE IF NOT EXISTS website_project_versions (
 );
 CREATE INDEX IF NOT EXISTS website_project_versions_idx ON website_project_versions(project_id,user_id,created_at DESC);
 ALTER TABLE ai_usage DROP CONSTRAINT IF EXISTS ai_usage_request_type_check;
-ALTER TABLE ai_usage ADD CONSTRAINT ai_usage_request_type_check CHECK (request_type IN ('chat','file_analysis','regenerate','website_build'));
+ALTER TABLE ai_usage ADD CONSTRAINT ai_usage_request_type_check CHECK (request_type IN ('chat','file_analysis','regenerate','website_build','edit'));
 CREATE INDEX IF NOT EXISTS users_created_idx ON users(created_at DESC);
 `
 	_, err := db.Exec(schema)

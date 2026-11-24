@@ -178,16 +178,56 @@ document.addEventListener("DOMContentLoaded", () => {
     const formatAnswer=value=>renderMarkdown(value);
     const regenerateButton=document.getElementById("regenerateLast");
     const refreshRegenerate=()=>{if(regenerateButton)regenerateButton.disabled=!box.querySelector(".chat-bubble.user");};
+    const copyText=async value=>{
+      if(navigator.clipboard&&window.isSecureContext){await navigator.clipboard.writeText(value);return;}
+      const area=document.createElement("textarea");area.value=value;area.style.cssText="position:fixed;opacity:0";document.body.appendChild(area);area.select();
+      const ok=document.execCommand("copy");area.remove();if(!ok)throw new Error("copy failed");
+    };
     const addMessage=(role,text,pending=false,messageId=0)=>{
       if(empty) empty.remove();
       const bubble=document.createElement("div");bubble.className="chat-bubble "+role+(pending?" pending":"");bubble.dataset.messageText=text;if(messageId)bubble.dataset.messageId=String(messageId);
       const label=document.createElement("small");label.textContent=role==="user"?"You":"ConnectAI assistant";
       const body=document.createElement("div");if(role==="model"&&!pending)body.innerHTML=formatAnswer(text);else body.textContent=text;
       bubble.append(label,body);
-      if(role==="model"&&!pending){const actions=document.createElement("div");actions.className="message-actions";const copy=document.createElement("button");copy.type="button";copy.className="text-tool";copy.textContent="Copy";copy.addEventListener("click",async()=>{try{await navigator.clipboard.writeText(text);copy.textContent="Copied ✓";setTimeout(()=>copy.textContent="Copy",1400);}catch(_){errorBox.textContent="Clipboard access is unavailable.";errorBox.hidden=false;}});actions.append(copy);
+      if(role==="user"&&!pending){const actions=document.createElement("div");actions.className="message-actions";const copy=document.createElement("button");copy.type="button";copy.className="text-tool";copy.textContent="Copy";copy.addEventListener("click",async()=>{try{await copyText(bubble.dataset.messageText||text);copy.textContent="Copied ✓";setTimeout(()=>copy.textContent="Copy",1400);}catch(_){errorBox.textContent="Clipboard access is unavailable.";errorBox.hidden=false;}});actions.append(copy);bubble.append(actions);if(messageId)attachEdit(bubble);}
+      if(role==="model"&&!pending){const actions=document.createElement("div");actions.className="message-actions";const copy=document.createElement("button");copy.type="button";copy.className="text-tool";copy.textContent="Copy";copy.addEventListener("click",async()=>{try{await copyText(text);copy.textContent="Copied ✓";setTimeout(()=>copy.textContent="Copy",1400);}catch(_){errorBox.textContent="Clipboard access is unavailable.";errorBox.hidden=false;}});actions.append(copy);
         if(messageId){const feedback=document.createElement("button");feedback.type="button";feedback.className="text-tool";feedback.textContent="Rate response";feedback.addEventListener("click",async()=>{const raw=prompt("Rate this answer from 1 (poor) to 5 (excellent):","5");if(raw===null)return;const rating=Number(raw);if(!Number.isInteger(rating)||rating<1||rating>5){errorBox.textContent="Enter a number from 1 to 5.";errorBox.hidden=false;return;}const comment=prompt("Optional feedback (500 characters maximum):","")||"";try{const res=await fetch(`/api/modules/${encodeURIComponent(slug)}/feedback`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({csrf_token:csrf,message_id:messageId,rating,comment})});if(!res.ok)throw new Error(await res.text());feedback.textContent="Thanks for your feedback ✓";feedback.disabled=true;}catch(err){errorBox.textContent=err.message||"Unable to save feedback.";errorBox.hidden=false;}});actions.append(feedback);}
         bubble.append(actions);}
       box.appendChild(bubble);box.scrollTop=box.scrollHeight;return bubble;
+    };
+    // Edit a sent prompt: the conversation continues from the edited text.
+    const attachEdit=bubble=>{
+      const text=bubble.dataset.messageText||"";
+      const actions=bubble.querySelector(".message-actions");
+      if(!actions||actions.querySelector(".edit-prompt")||/^Uploaded file: /.test(text))return;
+      const edit=document.createElement("button");edit.type="button";edit.className="text-tool edit-prompt";edit.textContent="Edit";
+      edit.addEventListener("click",()=>startEdit(bubble));actions.append(edit);
+    };
+    const startEdit=bubble=>{
+      const original=bubble.dataset.messageText||"";
+      const body=bubble.children[1],actions=bubble.querySelector(".message-actions");
+      const area=document.createElement("textarea");area.className="edit-area";area.value=original;area.maxLength=8000;area.rows=Math.min(10,Math.max(3,original.split("\n").length+1));
+      const bar=document.createElement("div");bar.className="edit-bar";
+      const save=document.createElement("button");save.type="button";save.className="button button-small";save.textContent="Save & resend";
+      const cancel=document.createElement("button");cancel.type="button";cancel.className="button button-small button-ghost";cancel.textContent="Cancel";
+      bar.append(save,cancel);body.replaceWith(area);actions.hidden=true;bubble.append(bar);area.focus();
+      const close=()=>{area.replaceWith(body);bar.remove();actions.hidden=false;};
+      cancel.addEventListener("click",close);
+      area.addEventListener("keydown",e=>{if(e.key==="Escape")close();else if(e.key==="Enter"&&(e.ctrlKey||e.metaKey))save.click();});
+      save.addEventListener("click",async()=>{
+        const text=area.value.trim();
+        if(!text)return;
+        if(text===original.trim()){close();return;}
+        const after=[...box.querySelectorAll(".chat-bubble")].filter(b=>bubble.compareDocumentPosition(b)&Node.DOCUMENT_POSITION_FOLLOWING).length;
+        if(after>1&&!confirm("Saving will replace the reply and remove "+(after-1)+" later message(s) in this conversation. Continue?"))return;
+        save.disabled=cancel.disabled=true;save.textContent="Resending…";errorBox.hidden=true;
+        try{
+          const response=await fetch(`/api/modules/${encodeURIComponent(slug)}/edit`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({csrf_token:csrf,message_id:Number(bubble.dataset.messageId),message:text})});
+          const raw=await response.text();
+          if(!response.ok)throw new Error(raw||"Unable to edit this message.");
+          box.innerHTML="";await loadHistory();
+        }catch(err){save.disabled=cancel.disabled=false;save.textContent="Save & resend";errorBox.textContent=err.message||"Unable to edit this message.";errorBox.hidden=false;}
+      });
     };
     const searchInput=document.getElementById("chatSearch");if(searchInput)searchInput.addEventListener("input",()=>{const q=searchInput.value.trim().toLocaleLowerCase();box.querySelectorAll(".chat-bubble").forEach(b=>b.hidden=!!q&&!(b.dataset.messageText||"").toLocaleLowerCase().includes(q));});
     const loadHistory=async()=>{
@@ -274,7 +314,7 @@ document.addEventListener("DOMContentLoaded", () => {
       const message=input.value.trim();
       if(!message||button.disabled)return;
       errorBox.hidden=true;
-      addMessage("user",message);
+      const userBubble=addMessage("user",message);
       input.value="";button.disabled=true;button.textContent="Thinking…";
       const pending=addMessage("model","Generating a response…",true);
       try{
@@ -285,7 +325,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const text=await response.text();
         if(!response.ok) throw new Error(text||"The request could not be completed.");
         let data;try{data=JSON.parse(text)}catch(_){throw new Error("The server returned an invalid response.")}
-        pending.remove();addMessage("model",data.answer||"No response was returned.",false,data.message_id);refreshRegenerate();
+        pending.remove();addMessage("model",data.answer||"No response was returned.",false,data.message_id);refreshRegenerate();if(data.user_message_id){userBubble.dataset.messageId=String(data.user_message_id);attachEdit(userBubble);}
       }catch(err){
         pending.remove();errorBox.textContent=err.message||"Something went wrong. Please try again.";errorBox.hidden=false;
       }finally{

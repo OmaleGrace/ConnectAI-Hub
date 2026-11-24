@@ -105,10 +105,9 @@ func (s *Server) prepareChat(userID int64, module Module, beforeID int64) (strin
 }
 
 // saveExchange stores the user message, the answer and the usage record in one
-// atomic statement (one database round trip) and returns the answer's id.
-func (s *Server) saveExchange(userID int64, slug, userText, answer, requestType string, inputChars int) (int64, error) {
-	var id int64
-	err := s.db.QueryRow(`
+// atomic statement (one database round trip) and returns both message ids.
+func (s *Server) saveExchange(userID int64, slug, userText, answer, requestType string, inputChars int) (userMsgID, modelMsgID int64, err error) {
+	err = s.db.QueryRow(`
 		WITH saved AS (
 			INSERT INTO ai_messages(user_id,module_slug,role,message)
 			VALUES ($1,$2,'user',$3),($1,$2,'model',$4)
@@ -117,9 +116,9 @@ func (s *Server) saveExchange(userID int64, slug, userText, answer, requestType 
 			INSERT INTO ai_usage(user_id,module_slug,request_type,input_characters,output_characters)
 			VALUES ($1,$2,$5,$6,$7)
 		)
-		SELECT id FROM saved WHERE role='model'`,
-		userID, slug, userText, answer, requestType, inputChars, len(answer)).Scan(&id)
-	return id, err
+		SELECT MAX(id) FILTER (WHERE role='user'), MAX(id) FILTER (WHERE role='model') FROM saved`,
+		userID, slug, userText, answer, requestType, inputChars, len(answer)).Scan(&userMsgID, &modelMsgID)
+	return
 }
 
 // Module instructions never change at runtime, so build each one only once.

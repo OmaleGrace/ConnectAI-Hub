@@ -258,6 +258,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /logout", s.logout)
 	s.mux.HandleFunc("POST /api/modules/{slug}/chat", s.chat)
 	s.mux.HandleFunc("POST /api/modules/{slug}/regenerate", s.regenerate)
+	s.mux.HandleFunc("POST /api/modules/{slug}/edit", s.editMessage)
 	s.mux.HandleFunc("POST /api/modules/{slug}/feedback", s.saveMessageFeedback)
 	s.mux.HandleFunc("POST /api/modules/{slug}/preferences", s.saveWorkspacePreferences)
 	s.mux.HandleFunc("GET /api/modules/{slug}/versions/{messageID}", s.responseVersions)
@@ -1188,7 +1189,8 @@ type chatRequest struct {
 	CSRF    string `json:"csrf_token"`
 }
 type chatResponse struct {
-	MessageID int64  `json:"message_id,omitempty"`
+	MessageID     int64  `json:"message_id,omitempty"`
+	UserMessageID int64  `json:"user_message_id,omitempty"`
 	Answer    string `json:"answer,omitempty"`
 	Error     string `json:"error,omitempty"`
 }
@@ -1983,14 +1985,14 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, safeAIError(err), http.StatusBadGateway)
 		return
 	}
-	responseID, err := s.saveExchange(u.ID, module.Slug, prompt, answer, "chat", len(prompt))
+	userMsgID, responseID, err := s.saveExchange(u.ID, module.Slug, prompt, answer, "chat", len(prompt))
 	if err != nil {
 		log.Printf("connectai: save chat exchange: %v", err)
 		http.Error(w, "The response was generated but could not be saved.", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(chatResponse{MessageID: responseID, Answer: answer})
+	_ = json.NewEncoder(w).Encode(chatResponse{MessageID: responseID, UserMessageID: userMsgID, Answer: answer})
 }
 
 // regenerate replaces the latest assistant answer using the latest user message.
@@ -2070,6 +2072,86 @@ func (s *Server) regenerate(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(chatResponse{Answer: answer})
+}
+
+// editMessage lets a user change a prompt they already sent. The conversation
+// continues from the edited prompt: the old reply and everything after it are
+// replaced by a fresh answer, as in most chat apps.
+func (s *Server) editMessage(w http.ResponseWriter, r *http.Request) {
+	u := s.currentUser(r)
+	if u == nil {
+		http.Error(w, "Please log in again.", http.StatusUnauthorized)
+		return
+	}
+	module, ok := s.findModule(r.PathValue("slug"))
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	var in struct {
+		CSRF      string `json:"csrf_token"`
+		MessageID int64  `json:"message_id"`
+		Message   string `json:"message"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&in); err != nil {
+		http.Error(w, "Please send a valid message.", http.StatusBadRequest)
+		return
+	}
+	cookie, err := r.Cookie("connectai_csrf")
+	if err != nil || cookie.Value == "" || in.CSRF != cookie.Value {
+		http.Error(w, "Your session check expired. Refresh the page and try again.", http.StatusForbidden)
+		return
+	}
+	if !s.allowRate("ai:"+fmt.Sprint(u.ID), 30, time.Minute) {
+		http.Error(w, "Too many requests. Please wait a minute and try again.", http.StatusTooManyRequests)
+		return
+	}
+	prompt := strings.TrimSpace(in.Message)
+	if prompt == "" || len(prompt) > 8000 {
+		http.Error(w, "Your message must contain between 1 and 8,000 characters.", http.StatusBadRequest)
+		return
+	}
+	var role, original string
+	if err := s.db.QueryRow(`SELECT role,message FROM ai_messages WHERE id=$1 AND user_id=$2 AND module_slug=$3`, in.MessageID, u.ID, module.Slug).Scan(&role, &original); err != nil || role != "user" {
+		http.Error(w, "That message could not be found.", http.StatusNotFound)
+		return
+	}
+	if strings.HasPrefix(original, "Uploaded file: ") {
+		http.Error(w, "File requests cannot be edited. Upload the file again with a new question.", http.StatusBadRequest)
+		return
+	}
+	if !s.withinDailyLimit(w, u.ID) {
+		return
+	}
+	instruction, temperature, history := s.prepareChat(u.ID, module, in.MessageID)
+	ctx, cancel := context.WithTimeout(r.Context(), 80*time.Second)
+	defer cancel()
+	answer, err := s.gemini.ForModule(module.Slug).GenerateWithTemperature(ctx, instruction, history, prompt, temperature)
+	if err != nil {
+		log.Printf("connectai: Gemini edit request failed: %v", err)
+		http.Error(w, safeAIError(err), http.StatusBadGateway)
+		return
+	}
+	// One atomic statement: drop everything after the edited prompt, update the
+	// prompt, store the new answer and record usage.
+	var newID int64
+	err = s.db.QueryRow(`
+		WITH removed AS (
+			DELETE FROM ai_messages WHERE user_id=$1 AND module_slug=$2 AND id>$3
+		), edited AS (
+			UPDATE ai_messages SET message=$4 WHERE id=$3 AND user_id=$1
+		), usage AS (
+			INSERT INTO ai_usage(user_id,module_slug,request_type,input_characters,output_characters) VALUES ($1,$2,'edit',$5,$6)
+		)
+		INSERT INTO ai_messages(user_id,module_slug,role,message) VALUES ($1,$2,'model',$7) RETURNING id`,
+		u.ID, module.Slug, in.MessageID, prompt, len(prompt), len(answer), answer).Scan(&newID)
+	if err != nil {
+		log.Printf("connectai: save edited exchange: %v", err)
+		http.Error(w, "The new response was generated but could not be saved.", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(chatResponse{MessageID: newID, UserMessageID: in.MessageID, Answer: answer})
 }
 
 // analyzeUpload accepts small text-based files for one-turn analysis.
@@ -2190,7 +2272,7 @@ func (s *Server) analyzeUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, safeAIError(err), http.StatusBadGateway)
 		return
 	}
-	if _, err := s.saveExchange(u.ID, module.Slug, "Uploaded file: "+name+"\nRequest: "+question, answer, "file_analysis", len(question)+len(name)); err != nil {
+	if _, _, err := s.saveExchange(u.ID, module.Slug, "Uploaded file: "+name+"\nRequest: "+question, answer, "file_analysis", len(question)+len(name)); err != nil {
 		log.Printf("connectai: save file analysis: %v", err)
 		http.Error(w, "The analysis was generated but could not be saved.", http.StatusInternalServerError)
 		return

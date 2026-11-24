@@ -443,3 +443,10 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .chat-bubble.model th, .chat-bubble.model td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--line); vertical-align: top; }
 .chat-bubble.model th { background: var(--surface); font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
 .chat-bubble.model tr:last-child td { border-bottom: 0; }
+
+/* Sent-prompt actions: copy and edit */
+.chat-bubble.user .message-actions { justify-content: flex-end; }
+.edit-area { width: 100%; min-height: 84px; margin-top: 6px; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--surface); color: var(--text); font: inherit; line-height: 1.6; resize: vertical; }
+.edit-area:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.edit-bar { display: flex; gap: 8px; justify-content: flex-end; margin-top: 10px; }
+.chat-bubble.user:has(.edit-area) { align-self: stretch; max-width: 100%; }
