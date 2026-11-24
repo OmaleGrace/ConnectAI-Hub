@@ -1,33 +1,35 @@
-/* ConnectAI Hub PWA worker. Keep installation lightweight: do not wait for a
-   large cache.addAll() request before the browser can finish installing. */
-const CACHE_NAME = "connectai-shell-v26";
-const STATIC_ASSETS = [
-  "/static/css/app.css", "/static/css/auth.css", "/static/css/chat.css", "/static/css/redesign.css", "/static/css/studio.css",
-  "/static/js/app.js", "/static/manifest.webmanifest",
-  "/static/icons/icon-192.png", "/static/icons/icon-512.png"
+/* ConnectAI Hub service worker: pre-caches the app shell, serves static files
+   stale-while-revalidate, and shows a friendly page when a navigation fails offline. */
+const CACHE = "connectai-shell-v2";
+const SHELL = [
+  "/static/css/app.css?v=21", "/static/js/app.js?v=21", "/static/manifest.webmanifest",
+  "/static/icons/mark.svg", "/static/icons/icon-192.png", "/static/icons/icon-512.png"
 ];
+const OFFLINE = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Offline · ConnectAI Hub</title><body style="font:16px system-ui;display:grid;place-items:center;min-height:100vh;margin:0;background:#faf7f2;color:#1c1917;text-align:center"><div><h1 style="font-family:Georgia,serif">You’re offline</h1><p>ConnectAI Hub needs a connection to reach your assistants. Check your network and try again.</p><p><a href="/" style="color:#d9480f">Retry</a></p></div>`;
+
 self.addEventListener("install", (event) => {
-  // Activate immediately. Static files are cached lazily after successful fetches.
-  event.waitUntil(caches.open(CACHE_NAME).then(() => self.skipWaiting()));
+  // Best effort: a failed pre-cache must never block installation.
+  event.waitUntil(caches.open(CACHE).then((c) => Promise.allSettled(SHELL.map((u) => c.add(u)))).then(() => self.skipWaiting()));
 });
 self.addEventListener("activate", (event) => {
   event.waitUntil((async () => {
     const keys = await caches.keys();
-    await Promise.all(keys.filter((key) => (key.startsWith("connectai-shell-") || key.startsWith("connectai-static-")) && key !== CACHE_NAME).map((key) => caches.delete(key)));
+    await Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)));
     await self.clients.claim();
   })());
 });
 self.addEventListener("fetch", (event) => {
-  const request = event.request;
-  const url = new URL(request.url);
-  if (request.method !== "GET" || url.origin !== self.location.origin || !url.pathname.startsWith("/static/")) return;
-  event.respondWith((async () => {
-    const cached = await caches.match(request);
-    if (cached) return cached;
-    try {
-      const response = await fetch(request);
-      if (response.ok) { const copy = response.clone(); caches.open(CACHE_NAME).then((cache) => cache.put(request, copy)).catch(() => {}); }
-      return response;
-    } catch (_) { return new Response("This resource is unavailable offline.", {status: 503, headers: {"Content-Type": "text/plain"}}); }
-  })());
+  const req = event.request;
+  const url = new URL(req.url);
+  if (req.method !== "GET" || url.origin !== self.location.origin) return;
+  if (req.mode === "navigate") {
+    event.respondWith(fetch(req).catch(() => new Response(OFFLINE, { status: 503, headers: { "Content-Type": "text/html; charset=utf-8" } })));
+    return;
+  }
+  if (!url.pathname.startsWith("/static/")) return;
+  event.respondWith(caches.open(CACHE).then(async (cache) => {
+    const cached = await cache.match(req);
+    const network = fetch(req).then((res) => { if (res.ok) cache.put(req, res.clone()); return res; }).catch(() => cached);
+    return cached || network;
+  }));
 });

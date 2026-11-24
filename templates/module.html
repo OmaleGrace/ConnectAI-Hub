@@ -1,38 +1,22 @@
 {{template "head" .}}{{template "nav" .}}
-<main class="module-page module-{{.Module.Slug}} wrap" data-module="{{.Module.Slug}}">
-  <a class="back-link" href="/dashboard">← Back to workspace</a>
+<main class="module-page wrap">
+  <a class="back-link" href="/dashboard">← All assistants</a>
   <section class="module-hero">
     <span class="tool-icon {{.Module.Color}} module-icon">{{.Module.Icon}}</span>
-    <div class="eyebrow">CONNECTAI HUB / SPECIALIST WORKSPACE</div>
-    <h1>{{.Module.Headline}}</h1>
+    <div class="eyebrow">ConnectAI Hub workspace</div>
+    <h1>{{.Module.Name}}</h1>
     <p>{{.Module.Description}}</p>
-    <div class="module-status"><span class="status-dot"></span> Specialist AI · Conversation saved to your account</div>
-  </section>
-  <section class="module-overview" aria-label="How this tool works">
-    <div class="module-overview-copy"><span class="eyebrow">YOUR WORKFLOW</span><h2>From first thought to useful outcome.</h2><p>A focused process designed around {{.Module.Name}}.</p></div>
-    <div class="module-workflow">{{range $i, $step := .Module.Workflow}}<div class="workflow-step"><span>0{{add $i 1}}</span><p>{{$step}}</p></div>{{end}}</div>
-    <div class="module-outputs"><span class="eyebrow">WHAT YOU CAN CREATE</span>{{range .Module.Outputs}}<div><span>↗</span>{{.}}</div>{{end}}</div>
+    <div class="module-status"><span class="status-dot"></span> Conversation saved to your account</div>
   </section>
   <section class="module-content">
     <div class="module-panel chat-panel">
-      <div class="panel-heading"><div><span class="eyebrow">{{.Module.PromptLabel}}</span><h2>{{.Module.EmptyTitle}}</h2><p class="module-chat-intro">{{.Module.EmptyText}}</p></div><span class="panel-spark">✧</span></div>
-      <div class="feature-list">{{range .Module.Features}}<div class="feature-row"><span>✓</span>{{.}}</div>{{end}}</div>
-      <div class="quick-prompts" aria-label="Suggested starting prompts">
-        <span class="quick-prompts-label">START WITH A TEMPLATE</span>
-        <div class="quick-prompt-list">{{range .QuickPrompts}}<button type="button" class="quick-prompt" data-prompt="{{.}}">{{.}}</button>{{end}}</div>
+      <div class="chat-messages" id="chatMessages" aria-live="polite">
+        <div class="chat-empty" id="chatEmpty"><span>✦</span><b>Your conversation starts here.</b><p>Ask a question or describe what you’d like help with.</p></div>
       </div>
-      <details class="workspace-settings"><summary>Workspace preferences</summary><div class="workspace-settings-body"><label for="workspaceInstructions">Custom instructions for this workspace</label><textarea id="workspaceInstructions" maxlength="1200" placeholder="Example: Explain concepts in simple steps and give one example.">{{.WorkspaceInstructions}}</textarea><label for="workspaceTemperature">Creativity <span id="temperatureValue">{{printf "%.1f" .WorkspaceTemperature}}</span></label><input id="workspaceTemperature" type="range" min="0.1" max="1.0" step="0.1" value="{{printf "%.1f" .WorkspaceTemperature}}"><label class="pin-workspace"><input id="workspacePinned" type="checkbox" {{if .WorkspacePinned}}checked{{end}}> Pin this workspace on my dashboard</label><button class="button button-ghost" id="saveWorkspacePreferences" type="button">Save preferences</button><small id="workspaceSaveStatus" aria-live="polite"></small></div></details>
-      {{if eq .Module.Slug "website"}}<div class="module-builder-link"><div><strong>Ready to generate a real website project?</strong><span>Move from planning to a live preview and downloadable source files.</span></div><a class="button" href="/builder">Open Website Builder ↗</a></div>{{end}}
-      <div class="chat-tools">
-        <span>Your conversation is private to your account.</span>
-        <div><a class="text-tool" href="/prompts">Prompt library</a><button type="button" class="text-tool" id="exportChat">Export .md</button><button type="button" class="text-tool" id="regenerateLast" disabled>Regenerate answer</button><button type="button" class="text-tool danger-tool" id="clearChat">Clear chat</button></div>
-      </div>
+      <p class="chat-error" id="chatError" role="alert" hidden></p>
       {{if or (eq .Module.Slug "documents") (eq .Module.Slug "data")}}
       <form class="document-upload" id="documentUpload" data-module="{{.Module.Slug}}" data-csrf="{{.CSRF}}">
-        <div>
-          <strong>{{if eq .Module.Slug "data"}}Bring your dataset{{else}}Bring your document{{end}}</strong>
-          <p>{{if eq .Module.Slug "data"}}Upload a CSV, spreadsheet or structured file to explore its contents. Maximum 5 MB.{{else}}Upload a document and ask questions grounded in its contents. Maximum 5 MB.{{end}}</p>
-        </div>
+        <div><strong>Analyse a file</strong><p>Upload a document or dataset (maximum 5 MB).</p></div>
         <label for="documentFile">Choose file</label>
         <input id="documentFile" name="document" type="file" accept=".txt,.md,.csv,.json,.log,.pdf,.docx,.xlsx,text/plain,text/csv,application/json,application/pdf" required>
         <label class="sr-only" for="documentQuestion">What should the AI look for?</label>
@@ -41,17 +25,22 @@
         <small>Supported: TXT, MD, CSV, JSON, LOG, PDF, DOCX and XLSX.</small>
       </form>
       {{end}}
-      <label class="chat-search-label" for="chatSearch">Search this conversation</label><input id="chatSearch" class="chat-search" type="search" placeholder="Find a word or phrase in this chat..."><div class="chat-messages" id="chatMessages" data-empty-title="{{.Module.EmptyTitle}}" data-empty-text="{{.Module.EmptyText}}" aria-live="polite">
-        <div class="chat-empty" id="chatEmpty"><span>✦</span><b>{{.Module.EmptyTitle}}</b><p>{{.Module.EmptyText}}</p></div>
-      </div>
+      <div class="quick-prompts" aria-label="Suggested starting prompts"><span class="quick-prompts-label">Try one of these</span><div class="quick-prompt-list">{{range .QuickPrompts}}<button type="button" class="quick-prompt" data-prompt="{{.}}">{{.}}</button>{{end}}</div></div>
       <form class="chat-form" id="chatForm" data-module="{{.Module.Slug}}" data-csrf="{{.CSRF}}">
         <label class="sr-only" for="chatInput">Your message</label>
-        <textarea id="chatInput" rows="3" maxlength="8000" data-initial-prompt="{{.Name}}" placeholder="{{.Module.ComposerPlaceholder}}" required></textarea>
-        <div class="chat-form-bottom"><span>Don't share passwords, API keys or private information.</span><button class="button" id="sendButton" type="submit">Send message ↗</button></div>
+        <textarea id="chatInput" rows="2" maxlength="8000" data-initial-prompt="{{.Name}}" placeholder="Message your {{.Module.Name}} assistant…" required></textarea>
+        <div class="chat-form-bottom"><span>Enter to send · Shift+Enter for a new line. Don’t share passwords or API keys.</span><button class="button" id="sendButton" type="submit">Send message ↗</button></div>
       </form>
-      <p class="chat-error" id="chatError" role="alert" hidden></p>
     </div>
-    <aside class="module-aside"><span class="aside-icon">✦</span><span class="eyebrow">A BETTER WAY TO WORK</span><h3>{{.Module.CTA}}</h3><p>{{.Module.Description}} Use the workflow and templates to get started, then refine the result with follow-up questions.</p><div class="aside-output-list">{{range .Module.Features}}<div><span>✓</span>{{.}}</div>{{end}}</div><a href="/dashboard" class="card-link">Explore all seven tools →</a></aside>
+    <aside class="module-aside">
+      <div class="aside-card"><h3>What it can do</h3><div class="feature-list">{{range .Module.Features}}<div class="feature-row"><span>✓</span>{{.}}</div>{{end}}</div></div>
+      <div class="aside-card"><h3>Starter templates</h3><p class="settings-help" style="margin-top:0">Click one, then fill in the [brackets].</p><div class="starter-list" id="starterList"></div></div>
+      <div class="aside-card"><h3>Conversation</h3>
+        <label class="sr-only" for="chatSearch">Search this conversation</label><input id="chatSearch" class="chat-search" type="search" placeholder="Search this chat…">
+        <div class="chat-tools"><a href="/prompts">Prompt library</a><button type="button" id="exportChat">Export as Markdown</button><button type="button" id="regenerateLast" disabled>Regenerate last answer</button><button type="button" class="danger-tool" id="clearChat">Clear chat</button></div>
+      </div>
+      <div class="aside-card"><details class="workspace-settings"><summary>Workspace preferences</summary><div class="workspace-settings-body"><label for="workspaceInstructions">Custom instructions</label><textarea id="workspaceInstructions" maxlength="1200" placeholder="Example: Explain concepts in simple steps and give one example.">{{.WorkspaceInstructions}}</textarea><label for="workspaceTemperature">Creativity <span id="temperatureValue">{{printf "%.1f" .WorkspaceTemperature}}</span></label><input id="workspaceTemperature" type="range" min="0.1" max="1.0" step="0.1" value="{{printf "%.1f" .WorkspaceTemperature}}"><label class="pin-workspace"><input id="workspacePinned" type="checkbox" {{if .WorkspacePinned}}checked{{end}}> Pin this workspace on my dashboard</label><button class="button button-ghost button-small" id="saveWorkspacePreferences" type="button">Save preferences</button><small id="workspaceSaveStatus" aria-live="polite"></small></div></details></div>
+    </aside>
   </section>
 </main>
 {{template "footer" .}}

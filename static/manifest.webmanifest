@@ -1,16 +1,17 @@
 {
   "id": "/",
   "name": "ConnectAI Hub",
-  "short_name": "ConnectAI",
-  "description": "Your workspace for learning, business, creativity and data.",
+  "short_name": "ConnectAI Hub",
+  "description": "Seven focused AI assistants for study, career, business, documents, websites, support and data.",
   "start_url": "/dashboard",
   "scope": "/",
   "display": "standalone",
-  "orientation": "portrait-primary",
-  "background_color": "#f3f1e9",
-  "theme_color": "#17392b",
+  "orientation": "any",
+  "background_color": "#faf7f2",
+  "theme_color": "#d9480f",
   "icons": [
     {"src": "/static/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
-    {"src": "/static/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}
+    {"src": "/static/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"},
+    {"src": "/static/icons/mark.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any"}
   ]
 }

@@ -1,3 +1,144 @@
+/* ConnectAI Hub — shared helpers ------------------------------------------------ */
+// Safe, dependency-free Markdown renderer for AI answers (headings, lists, tables,
+// quotes, code, links). All input is HTML-escaped first, so output cannot inject markup.
+function renderMarkdown(source) {
+  const esc = (t) => t.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const inline = (t) => {
+    const codes = [];
+    t = t.replace(/`([^`\n]+)`/g, (_, c) => { codes.push(c); return "\u0000" + (codes.length - 1) + "\u0000"; });
+    t = t.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
+         .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+         .replace(/(^|[^*\w])\*([^*\n]+)\*(?!\w)/g, "$1<em>$2</em>");
+    return t.replace(/\u0000(\d+)\u0000/g, (_, i) => "<code>" + codes[Number(i)] + "</code>");
+  };
+  const lines = esc(String(source || "").replace(/\r\n?/g, "\n")).split("\n");
+  const out = [];
+  let i = 0;
+  const isTableSep = (l) => /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$/.test(l || "");
+  const cells = (l) => l.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
+  while (i < lines.length) {
+    const line = lines[i];
+    let m;
+    if ((m = line.match(/^\s*```([\w-]*)\s*$/))) {
+      const code = [];
+      i++;
+      while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) code.push(lines[i++]);
+      i++;
+      out.push("<pre><code>" + code.join("\n") + "</code></pre>");
+    } else if (!line.trim()) {
+      i++;
+    } else if ((m = line.match(/^(#{1,4})\s+(.*)$/))) {
+      const level = Math.min(m[1].length + 2, 6);
+      out.push("<h" + level + ">" + inline(m[2]) + "</h" + level + ">");
+      i++;
+    } else if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) {
+      out.push("<hr>");
+      i++;
+    } else if (line.includes("|") && isTableSep(lines[i + 1])) {
+      const head = cells(line);
+      i += 2;
+      const rows = [];
+      while (i < lines.length && lines[i].includes("|") && lines[i].trim()) rows.push(cells(lines[i++]));
+      out.push("<div class=\"table-scroll\"><table><thead><tr>" + head.map((c) => "<th>" + inline(c) + "</th>").join("") + "</tr></thead><tbody>" +
+        rows.map((r) => "<tr>" + r.map((c) => "<td>" + inline(c) + "</td>").join("") + "</tr>").join("") + "</tbody></table></div>");
+    } else if (/^\s*&gt;\s?/.test(line)) {
+      const q = [];
+      while (i < lines.length && /^\s*&gt;\s?/.test(lines[i])) q.push(lines[i++].replace(/^\s*&gt;\s?/, ""));
+      out.push("<blockquote>" + inline(q.join("<br>")) + "</blockquote>");
+    } else if (/^\s*([-*•]|\d+[.)])\s+/.test(line)) {
+      const ordered = /^\s*\d+[.)]\s+/.test(line);
+      const items = [];
+      while (i < lines.length && /^\s*([-*•]|\d+[.)])\s+/.test(lines[i])) {
+        let item = lines[i++].replace(/^\s*([-*•]|\d+[.)])\s+/, "");
+        while (i < lines.length && /^\s{2,}\S/.test(lines[i]) && !/^\s*([-*•]|\d+[.)])\s+/.test(lines[i])) item += "<br>" + lines[i++].trim();
+        items.push("<li>" + inline(item) + "</li>");
+      }
+      out.push((ordered ? "<ol>" : "<ul>") + items.join("") + (ordered ? "</ol>" : "</ul>"));
+    } else {
+      const para = [];
+      while (i < lines.length && lines[i].trim() && !/^(#{1,4}\s|\s*```|\s*([-*•]|\d+[.)])\s+|\s*&gt;)/.test(lines[i]) && !(lines[i].includes("|") && isTableSep(lines[i + 1]))) para.push(lines[i++]);
+      out.push("<p>" + inline(para.join("<br>")) + "</p>");
+    }
+  }
+  return out.join("");
+}
+
+// Fill-in starter templates for each assistant. [Square brackets] mark what to replace.
+const STARTERS = {
+  study: [
+    ["Explain a topic", "Explain [topic] to a [beginner / high-school / university] student. Start with the big idea in one sentence, then a simple explanation, a real-world example and a 3-question check."],
+    ["Quiz me", "Quiz me on [topic] at [easy / medium / hard] level. Ask one question at a time, wait for my answer, then give feedback."],
+    ["Flashcards", "Create 10 flashcards (question and answer in a table) from these notes:\n[paste notes]"],
+    ["Study plan", "Build a day-by-day study plan for [subject/exam] on [date]. I can study [hours] per day and I'm weakest in [topics]."],
+    ["Worked example", "Show a fully worked example of [problem type], explaining the reason for every step."]
+  ],
+  career: [
+    ["CV bullets", "Turn this experience into 4 achievement-focused CV bullets (action, result, number where possible):\n[describe role and what you did]"],
+    ["Cover letter", "Write a 300-word cover letter for the role of [job title] at [company]. My background: [summary]. Job description:\n[paste]"],
+    ["Mock interview", "Run a mock interview for [job title]. Ask one question at a time, then give feedback and a stronger sample answer."],
+    ["Career path", "I currently work as [role] with skills in [skills]. Compare 3 realistic career paths toward [goal] and list the skill gaps and next steps."],
+    ["Salary talk", "Help me prepare to negotiate a salary for [job title] in [city/country]. My offer is [amount]; my strengths are [list]."]
+  ],
+  business: [
+    ["Stress-test idea", "Stress-test this business idea: [idea]. Target customer: [who]. List the biggest risks and the cheapest test for each."],
+    ["Lean canvas", "Create a one-page lean canvas for [business idea] aimed at [customer] in [location]."],
+    ["Marketing plan", "Build a 30-day marketing plan for [product/service] with a budget of [amount]. Include channels, weekly actions and metrics."],
+    ["Product copy", "Write a persuasive product description (60-100 words) for [product]. Audience: [who]. Key benefits: [list]. Tone: [tone]."],
+    ["Pricing", "Suggest 3 pricing options for [product/service] with costs of [costs] and competitors charging [prices]. Show the simple maths."]
+  ],
+  documents: [
+    ["Summarise", "Summarise the following in 5 bullet points, then give a one-sentence takeaway:\n[paste text]"],
+    ["Key facts", "Extract all names, dates, amounts and obligations from this text into a table:\n[paste text]"],
+    ["Action items", "List the action items, owners and deadlines, plus any open questions, from this text:\n[paste text]"],
+    ["Plain language", "Explain this in plain language for someone with no background, and flag anything I should double-check with a professional:\n[paste text]"],
+    ["Outline", "Turn these notes into a clear, organised outline with headings:\n[paste notes]"]
+  ],
+  website: [
+    ["Sitemap", "Plan the pages for a [type] website for [business]. Give a sitemap, the sections on each page and a call to action for each."],
+    ["Homepage copy", "Write homepage copy for [business] serving [audience]: headline, subheadline, 3 benefits and a call to action. Tone: [tone]."],
+    ["UX review", "Review this page for usability, accessibility, mobile layout and SEO. List issues by priority with a fix for each:\n[paste HTML or describe the page]"],
+    ["SEO basics", "Suggest SEO titles (under 60 characters) and meta descriptions (under 155) for these pages: [list pages]. Keywords: [keywords]."],
+    ["Launch checklist", "Give me a launch checklist for my website [type], covering content, performance, security, analytics and promotion."]
+  ],
+  support: [
+    ["Reply to customer", "Draft a calm, empathetic reply to this customer message. Tone: [tone]. What I can offer: [solution].\n[paste message]"],
+    ["FAQ", "Create 10 FAQs with short answers for [product/service], grouped by theme. Key policies: [list]."],
+    ["Workflow", "Design a support workflow for [team size] handling [channels]. Include triage levels, response-time targets and escalation steps."],
+    ["Canned replies", "Write 6 reusable reply templates for [common issues], each with [placeholders] for personal details."],
+    ["Complaint summary", "Summarise this complaint, identify the root cause and list what we should fix:\n[paste complaint]"]
+  ],
+  data: [
+    ["Understand data", "Here is my data: [paste a sample or describe columns]. Explain what it contains, flag quality issues and suggest 3 questions it could answer."],
+    ["Metrics", "My goal is [goal] for [business/project]. Suggest the 6 most useful metrics, how to calculate each, and what a good result looks like."],
+    ["Pick charts", "I want to show [insight] to [audience]. Recommend the best chart type(s) and what goes on each axis."],
+    ["Clean data", "Give me a step-by-step checklist (with Excel/Sheets formulas) to clean this kind of data: [describe]."],
+    ["Findings summary", "Write a short, plain-language findings summary for a manager based on these results:\n[paste results]"]
+  ]
+};
+
+document.addEventListener("DOMContentLoaded", () => {
+  const list = document.getElementById("starterList");
+  const form = document.getElementById("chatForm");
+  const input = document.getElementById("chatInput");
+  if (!list || !form || !input) return;
+  (STARTERS[form.dataset.module] || []).forEach(([label, text]) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = label;
+    button.addEventListener("click", () => {
+      input.value = text;
+      input.dispatchEvent(new Event("input"));
+      input.focus();
+      const start = text.indexOf("[");
+      const end = text.indexOf("]", start);
+      if (start >= 0 && end > start) input.setSelectionRange(start, end + 1);
+      input.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    });
+    list.appendChild(button);
+  });
+  if (!list.children.length) list.closest(".aside-card")?.remove();
+});
+
 document.addEventListener("DOMContentLoaded", () => {
   const toggle=document.querySelector(".menu-toggle"), nav=document.querySelector(".nav-links");
   if(toggle&&nav) toggle.addEventListener("click",()=>{const open=nav.classList.toggle("open");toggle.setAttribute("aria-expanded",String(open));});
@@ -34,7 +175,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if(input.dataset.initialPrompt){input.value=input.dataset.initialPrompt;input.focus();}
     const empty=document.getElementById("chatEmpty");
     const escapeHTML=value=>value.replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
-    const formatAnswer=value=>{let safe=escapeHTML(value);safe=safe.replace(/```([\w-]*)\n([\s\S]*?)```/g,(_,lang,code)=>`<pre><code>${code.replace(/\n$/,'')}</code></pre>`);safe=safe.replace(/`([^`\n]+)`/g,"<code>$1</code>").replace(/\*\*([^*\n]+)\*\*/g,"<strong>$1</strong>").replace(/\*([^*\n]+)\*/g,"<em>$1</em>");return safe.split(/\n{2,}/).map(part=>part.startsWith("<pre>")?part:`<p>${part.replace(/\n/g,"<br>")}</p>`).join("");};
+    const formatAnswer=value=>renderMarkdown(value);
     const regenerateButton=document.getElementById("regenerateLast");
     const refreshRegenerate=()=>{if(regenerateButton)regenerateButton.disabled=!box.querySelector(".chat-bubble.user");};
     const addMessage=(role,text,pending=false,messageId=0)=>{
@@ -85,7 +226,7 @@ document.addEventListener("DOMContentLoaded", () => {
           body:JSON.stringify({csrf_token:csrf})
         });
         if(!response.ok) throw new Error(await response.text()||"Unable to clear conversation.");
-        box.innerHTML=`<div class="chat-empty" id="chatEmpty"><span>✦</span><b>${escapeHTML(box.dataset.emptyTitle||"Your conversation starts here.")}</b><p>${escapeHTML(box.dataset.emptyText||"Ask a question or describe what you would like help with.")}</p></div>`;
+        box.innerHTML=`<div class="chat-empty" id="chatEmpty"><span>✦</span><b>Your conversation starts here.</b><p>Ask a question or describe what you'd like help with.</p></div>`;
         errorBox.hidden=true;
       }catch(err){errorBox.textContent=err.message||"Unable to clear conversation.";errorBox.hidden=false;}
       finally{clearButton.disabled=false;}
@@ -163,7 +304,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const key = "connectai-theme";
   const select = document.getElementById("themePreference");
   let saved = "system";
-  try { saved = localStorage.getItem(key) || "system"; } catch (_) {}
+  try { saved = localStorage.getItem(key) || localStorage.getItem("connectai-theme") || "system"; } catch (_) {}
   root.dataset.theme = saved;
   if (select) {
     select.value = saved;
@@ -222,7 +363,7 @@ if ("serviceWorker" in navigator && location.protocol === "https:") {
   window.addEventListener("load", () => {
     navigator.serviceWorker.register("/service-worker.js", {updateViaCache: "none"})
       .then((registration) => registration.update().catch(() => {}))
-      .catch((error) => console.warn("ConnectAI service worker unavailable:", error));
+      .catch((error) => console.warn("ConnectAI Hub service worker unavailable:", error));
   });
 }
 
@@ -266,3 +407,21 @@ document.querySelectorAll('[data-live-form]').forEach((form) => {
     feedback.className = 'live-feedback password-rules ' + (checks.every(Boolean) ? 'valid' : 'invalid');
   });
 });
+
+
+// Composer ergonomics: auto-growing textarea, Enter sends, Shift+Enter adds a line.
+(() => {
+  const input = document.getElementById("chatInput");
+  const form = document.getElementById("chatForm");
+  if (!input || !form) return;
+  const fit = () => { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 220) + "px"; };
+  input.addEventListener("input", fit);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing && window.matchMedia("(min-width: 700px)").matches) {
+      e.preventDefault();
+      if (input.value.trim()) form.requestSubmit();
+    }
+  });
+  form.addEventListener("submit", () => setTimeout(fit, 0));
+  fit();
+})();

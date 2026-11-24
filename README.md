@@ -1,6 +1,6 @@
 # ConnectAI Hub 🚀
 
-### One Hub. Endless Possibilities.
+### Seven specialists. One calm workspace.
 
 ConnectAI Hub is an all-in-one AI-powered platform that brings multiple intelligent tools together in one workspace. It helps users learn, build, analyse information, manage business tasks and improve productivity using configurable AI models through OpenRouter or Google Gemini.
 
@@ -424,3 +424,18 @@ The Website Builder now includes: AI brief assessment (asks concise clarificatio
 OpenRouter workspace model overrides remain optional. Set `OPENROUTER_MODEL_WEBSITE` for the primary website model, `OPENROUTER_FALLBACK_MODEL` for a shared fallback, or `OPENROUTER_FALLBACK_MODEL_WEBSITE` for a website-only fallback. Website generation/edit calls allow up to 420 seconds at the application context level; individual OpenRouter attempts are bounded separately and may retry once before trying the configured fallback.
 
 The visual editor currently supports inline text edits in the preview; structural layout changes are made through the AI edit assistant or source editor. Website publishing/custom-domain deployment is not enabled by this package: users can download the static website ZIP and deploy it with a hosting provider. AI quality review is advisory and does not execute the generated website or guarantee security.
+
+
+## 🎨 Design system & performance notes
+
+- One stylesheet (`static/css/app.css`) with design tokens for light and dark themes; fonts: system UI + Fraunces (single request, `display=swap`).
+- Static assets are served with cache headers; bump the `?v=` query in `templates/base.html` and `static/service-worker.js` whenever CSS/JS change.
+- Text responses are gzip-compressed (`internal/web/middleware.go`); pages are rendered to a buffer before sending.
+- Service worker pre-caches the app shell and shows an offline page for failed navigations.
+- Internal identifiers (Go module path `connectai-hub`, `connectai_session`/`connectai_csrf` cookies) were intentionally left unchanged so existing sessions keep working.
+
+## 🧠 Assistant upgrades
+
+- Rewritten system prompts per assistant (modes such as one-question-at-a-time quizzes and mock interviews, grounded document answers, data-quality checks, empathetic support replies) in `moduleInstruction` (`internal/web/server.go`).
+- Six quick prompts per assistant plus fill-in **starter templates** (`STARTERS` in `static/js/app.js`).
+- Answers render as safe Markdown: headings, lists, tables, quotes, code blocks and links.
