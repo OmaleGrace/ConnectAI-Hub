@@ -96,12 +96,14 @@ func (s *Server) prepareChat(userID int64, module Module, beforeID int64) (strin
 		instruction string
 		temperature float64
 		history     []ai.Message
+		facts       []string
 	)
-	wg.Add(2)
+	wg.Add(3)
 	go func() { defer wg.Done(); instruction, temperature = s.workspaceSettings(userID, module) }()
 	go func() { defer wg.Done(); history = s.loadHistory(userID, module.Slug, beforeID) }()
+	go func() { defer wg.Done(); facts = s.loadMemories(userID) }()
 	wg.Wait()
-	return instruction, temperature, history
+	return instruction + memoryBlock(facts), temperature, history
 }
 
 // saveExchange stores the user message, the answer and the usage record in one

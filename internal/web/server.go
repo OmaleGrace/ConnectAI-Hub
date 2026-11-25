@@ -63,6 +63,8 @@ type PageData struct {
 	ModuleUsage                                              []ModuleUsage
 	Sessions                                                 []SessionInfo
 	Modules                                                  []Module
+	Memories                                                 []MemoryItem
+	MemoryEnabled                                            bool
 	SavedPrompts                                             []SavedPrompt
 	Notifications                                            []NotificationItem
 	Module                                                   Module
@@ -140,7 +142,7 @@ type Server struct {
 }
 
 func New(db *sql.DB) (*Server, error) {
-	t, err := template.New("pages").Funcs(template.FuncMap{"add": func(a, b int) int { return a + b }, "subtract": func(a, b int) int { return a - b }, "mulPercent": func(used, limit int64) int {
+	t, err := template.New("pages").Funcs(template.FuncMap{"asset": assetURL, "add": func(a, b int) int { return a + b }, "subtract": func(a, b int) int { return a - b }, "mulPercent": func(used, limit int64) int {
 		if limit <= 0 {
 			return 0
 		}
@@ -245,6 +247,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /settings/delete", s.deleteAccount)
 	s.mux.HandleFunc("GET /settings/data-export", s.exportAccountData)
 	s.mux.HandleFunc("POST /settings/history/delete", s.deleteAIHistory)
+	s.mux.HandleFunc("POST /settings/memory", s.memoryToggle)
+	s.mux.HandleFunc("POST /settings/memory/delete", s.memoryDelete)
+	s.mux.HandleFunc("POST /settings/memory/clear", s.memoryClear)
 	s.mux.HandleFunc("GET /forgot-password", s.forgotPasswordPage)
 	s.mux.HandleFunc("POST /forgot-password", s.forgotPassword)
 	s.mux.HandleFunc("GET /reset-password", s.resetPasswordPage)
@@ -284,6 +289,8 @@ func (s *Server) render(w http.ResponseWriter, name string, d PageData) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "private, no-cache") // pages hold per-user data
+	w.Header().Set("Content-Length", strconv.Itoa(buf.Len()))
 	_, _ = w.Write(buf.Bytes())
 }
 func (s *Server) csrf(w http.ResponseWriter, r *http.Request) string {
@@ -1094,7 +1101,8 @@ func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request) {
 	var plan string
 	var expires time.Time
 	_ = s.db.QueryRow(`SELECT COALESCE(plan,'free'),COALESCE(plus_expires_at,'epoch'::timestamptz) FROM users WHERE id=$1`, u.ID).Scan(&plan, &expires)
-	s.render(w, "settings.html", PageData{Title: "Account settings", Active: "settings", User: u, CSRF: s.csrf(w, r), UsageTotal: total, UsageMonth: month, Success: r.URL.Query().Get("saved"), Name: map[string]string{"sent": "reset-sent", "unavailable": "reset-unavailable", "verify": "delete-verify", "phone-sent": "phone-sent", "phone-ok": "phone-ok", "phone-failed": "phone-failed"}[firstNonEmpty(r.URL.Query().Get("data"), firstNonEmpty(r.URL.Query().Get("reset"), firstNonEmpty(r.URL.Query().Get("delete"), r.URL.Query().Get("phone"))))], Phone: phone.String, PhoneVerified: phoneVerified, UnreadNotifications: unread, UserPlan: plan, PlusExpiresAt: expires, NotificationEmail: emailNotifications})
+	memOn, memories := s.settingsMemory(u.ID)
+	s.render(w, "settings.html", PageData{Title: "Account settings", Memories: memories, MemoryEnabled: memOn, Active: "settings", User: u, CSRF: s.csrf(w, r), UsageTotal: total, UsageMonth: month, Success: r.URL.Query().Get("saved"), Name: map[string]string{"sent": "reset-sent", "unavailable": "reset-unavailable", "verify": "delete-verify", "phone-sent": "phone-sent", "phone-ok": "phone-ok", "phone-failed": "phone-failed"}[firstNonEmpty(r.URL.Query().Get("data"), firstNonEmpty(r.URL.Query().Get("reset"), firstNonEmpty(r.URL.Query().Get("delete"), r.URL.Query().Get("phone"))))], Phone: phone.String, PhoneVerified: phoneVerified, UnreadNotifications: unread, UserPlan: plan, PlusExpiresAt: expires, NotificationEmail: emailNotifications})
 }
 
 func (s *Server) updateProfile(w http.ResponseWriter, r *http.Request) {
@@ -1302,7 +1310,7 @@ func (s *Server) startPlusPayment(w http.ResponseWriter, r *http.Request) {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.paystack.co/transaction/initialize", bytes.NewReader(payload))
 	req.Header.Set("Authorization", "Bearer "+secret)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := outboundClient.Do(req)
 	if err != nil {
 		_, _ = s.db.Exec(`UPDATE plan_payments SET status='failed' WHERE reference=$1`, reference)
 		http.Error(w, "Payment provider could not be reached. Please try again.", 502)
@@ -1353,7 +1361,7 @@ func (s *Server) finishPlusPayment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Header.Set("Authorization", "Bearer "+secret)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := outboundClient.Do(req)
 	if err != nil {
 		http.Error(w, "Unable to verify payment. Please refresh in a moment.", 502)
 		return
@@ -1991,6 +1999,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "The response was generated but could not be saved.", http.StatusInternalServerError)
 		return
 	}
+	s.rememberAsync(u.ID, prompt)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(chatResponse{MessageID: responseID, UserMessageID: userMsgID, Answer: answer})
 }
@@ -2150,6 +2159,7 @@ func (s *Server) editMessage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "The new response was generated but could not be saved.", http.StatusInternalServerError)
 		return
 	}
+	s.rememberAsync(u.ID, prompt)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(chatResponse{MessageID: newID, UserMessageID: in.MessageID, Answer: answer})
 }
@@ -2524,7 +2534,7 @@ Core rules:
 - Protect privacy: do not request passwords, API keys or other secrets.
 - If a request is outside your specialty, say so briefly and point to the most relevant ConnectAI Hub assistant.
 - Finish longer answers with a short "Next step" suggestion.
-- About this app: you live inside ConnectAI Hub, which has seven workspaces (Study, Career, Business, Documents, Website, Support, Data). Each user's conversation in each workspace is saved automatically and is still there when they return; the last several messages are sent to you as context. Never say you cannot remember previous chats: you can see this workspace's recent conversation, but not older parts or other workspaces.
+- About this app: you live inside ConnectAI Hub, which has seven workspaces (Study, Career, Business, Documents, Website, Support, Data). Each user's conversation in each workspace is saved automatically and is still there when they return; the last several messages are sent to you as context. Never say you cannot remember previous chats: you can see this workspace's recent conversation, but not older parts or other workspaces. The app also keeps a few short facts the user shared (name, role, goals) and may give them to you as background; users manage them under Settings > Assistant memory.
 - If asked about the app itself, only mention what exists: "Clear chat" (starts fresh), "Regenerate last answer", "Export as Markdown", "Search this conversation", and "Workspace preferences" (Custom instructions and Creativity). Do not describe buttons from other products.
 - If the user wants you to always remember something (their name, role, tone), tell them to add it under Workspace preferences > Custom instructions in that workspace, and offer to help word it.
 `
@@ -2861,17 +2871,23 @@ func (s *Server) exportAccountData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows.Close()
+	_, memoryItems := s.settingsMemory(u.ID)
+	remembered := make([]string, 0, len(memoryItems))
+	for _, it := range memoryItems {
+		remembered = append(remembered, it.Fact)
+	}
 	type exportData struct {
 		ExportedAt    time.Time       `json:"exported_at"`
 		Profile       any             `json:"profile"`
 		Conversations []messageRecord `json:"conversations"`
 		Usage         []usageRecord   `json:"usage"`
 		Payments      []paymentRecord `json:"payments"`
+		Memory        []string        `json:"assistant_memory"`
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="connectai-hub-data-%d.json"`, u.ID))
 	w.Header().Set("Cache-Control", "no-store, private")
-	_ = json.NewEncoder(w).Encode(exportData{time.Now().UTC(), profile, messages, usage, payments})
+	_ = json.NewEncoder(w).Encode(exportData{time.Now().UTC(), profile, messages, usage, payments, remembered})
 }
 
 // deleteAIHistory removes only the signed-in user's AI messages and usage
@@ -2898,6 +2914,9 @@ func (s *Server) deleteAIHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, err = tx.Exec(`DELETE FROM ai_messages WHERE user_id=$1`, u.ID); err == nil {
 		_, err = tx.Exec(`DELETE FROM ai_usage WHERE user_id=$1`, u.ID)
+	}
+	if err == nil {
+		_, err = tx.Exec(`DELETE FROM user_memories WHERE user_id=$1`, u.ID)
 	}
 	if err != nil {
 		_ = tx.Rollback()

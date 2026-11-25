@@ -130,7 +130,7 @@ CREATE INDEX IF NOT EXISTS ai_usage_user_created_idx ON ai_usage(user_id, create
 CREATE INDEX IF NOT EXISTS ai_usage_user_module_idx ON ai_usage(user_id, module_slug);
 CREATE INDEX IF NOT EXISTS ai_usage_created_idx ON ai_usage(created_at DESC);
 ALTER TABLE ai_usage DROP CONSTRAINT IF EXISTS ai_usage_request_type_check;
-ALTER TABLE ai_usage ADD CONSTRAINT ai_usage_request_type_check CHECK (request_type IN ('chat','file_analysis','regenerate'));
+ALTER TABLE ai_usage ADD CONSTRAINT ai_usage_request_type_check CHECK (request_type IN ('chat','file_analysis','regenerate','website_build','edit'));
 CREATE TABLE IF NOT EXISTS ai_message_feedback (
  id BIGSERIAL PRIMARY KEY,
  user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -192,6 +192,14 @@ CREATE INDEX IF NOT EXISTS website_project_versions_idx ON website_project_versi
 ALTER TABLE ai_usage DROP CONSTRAINT IF EXISTS ai_usage_request_type_check;
 ALTER TABLE ai_usage ADD CONSTRAINT ai_usage_request_type_check CHECK (request_type IN ('chat','file_analysis','regenerate','website_build','edit'));
 CREATE INDEX IF NOT EXISTS users_created_idx ON users(created_at DESC);
+CREATE TABLE IF NOT EXISTS user_memories (
+ id BIGSERIAL PRIMARY KEY,
+ user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ fact TEXT NOT NULL,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS user_memories_user_idx ON user_memories(user_id,id DESC);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS memory_enabled BOOLEAN NOT NULL DEFAULT TRUE;
 `
 	_, err := db.Exec(schema)
 	return err

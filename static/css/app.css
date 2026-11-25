@@ -26,7 +26,7 @@
   --radius: 14px;
   --radius-sm: 10px;
   --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --display: "Fraunces", Georgia, "Times New Roman", serif;
+  --display: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, "Noto Serif", serif;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --gutter: clamp(18px, 4vw, 40px);
 }
@@ -450,3 +450,8 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .edit-area:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
 .edit-bar { display: flex; gap: 8px; justify-content: flex-end; margin-top: 10px; }
 .chat-bubble.user:has(.edit-area) { align-self: stretch; max-width: 100%; }
+
+/* Assistant memory list */
+.memory-list { margin: 14px 0; border-top: 1px solid var(--line); }
+.memory-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); margin: 0; }
+.memory-row span { overflow-wrap: anywhere; }

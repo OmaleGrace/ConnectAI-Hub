@@ -27,6 +27,7 @@ func compressibleType(contentType string) bool {
 		strings.HasPrefix(ct, "application/json"),
 		strings.HasPrefix(ct, "application/javascript"),
 		strings.HasPrefix(ct, "application/xml"),
+		strings.HasPrefix(ct, "image/svg+xml"),
 		strings.Contains(ct, "+json"),
 		strings.Contains(ct, "+xml"):
 		return true
@@ -99,14 +100,15 @@ func serveWithCompression(next http.Handler, w http.ResponseWriter, r *http.Requ
 // version query are immutable; other files are revalidated. In development
 // everything is revalidated so edits show up immediately.
 func staticHandler() http.Handler {
-	files := http.StripPrefix("/static/", http.FileServer(http.Dir("./static")))
+	files := http.StripPrefix("/static/", http.FileServer(noListingFS{http.Dir("./static")}))
 	production := os.Getenv("APP_ENV") == "production"
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.URL.Query().Get("v") != "":
+			// Fingerprinted by {{asset}}: the URL changes whenever the file does.
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		case !production:
 			w.Header().Set("Cache-Control", "no-cache")
-		case r.URL.Query().Get("v") != "":
-			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		default:
 			w.Header().Set("Cache-Control", "public, max-age=3600, must-revalidate")
 		}
