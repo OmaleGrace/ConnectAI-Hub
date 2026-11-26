@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -223,6 +224,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /dashboard", s.dashboard)
 	s.mux.HandleFunc("POST /billing/plus", s.startPlusPayment)
 	s.mux.HandleFunc("GET /billing/callback", s.finishPlusPayment)
+	s.mux.HandleFunc("POST /billing/webhook", s.paystackWebhook)
 	s.mux.HandleFunc("GET /prompts", s.promptsPage)
 	s.mux.HandleFunc("POST /prompts", s.createPrompt)
 	s.mux.HandleFunc("POST /prompts/{id}/delete", s.deletePrompt)
@@ -1199,8 +1201,8 @@ type chatRequest struct {
 type chatResponse struct {
 	MessageID     int64  `json:"message_id,omitempty"`
 	UserMessageID int64  `json:"user_message_id,omitempty"`
-	Answer    string `json:"answer,omitempty"`
-	Error     string `json:"error,omitempty"`
+	Answer        string `json:"answer,omitempty"`
+	Error         string `json:"error,omitempty"`
 }
 type storedMessage struct {
 	ID        int64     `json:"id"`
@@ -1348,60 +1350,19 @@ func (s *Server) finishPlusPayment(w http.ResponseWriter, r *http.Request) {
 		s.render(w, "billing-result.html", PageData{Title: "Payment result", Name: "success", Success: "This payment has already been verified. Your ConnectAI Plus access is active.", User: s.currentUser(r), CSRF: s.csrf(w, r)})
 		return
 	}
-	secret := strings.TrimSpace(os.Getenv("PAYSTACK_SECRET_KEY"))
-	if secret == "" {
-		http.Error(w, "Payment verification is unavailable.", 503)
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.paystack.co/transaction/verify/"+reference, nil)
-	if err != nil {
-		http.Error(w, "Unable to verify payment.", 502)
-		return
-	}
-	req.Header.Set("Authorization", "Bearer "+secret)
-	resp, err := outboundClient.Do(req)
-	if err != nil {
+	tx, err := s.verifyPaystackTransaction(r.Context(), reference)
+	switch {
+	case errors.Is(err, errPaystackUnavailable):
 		http.Error(w, "Unable to verify payment. Please refresh in a moment.", 502)
 		return
-	}
-	defer resp.Body.Close()
-	var verified paystackVerifyResponse
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 || json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&verified) != nil || !verified.Status || verified.Data.Status != "success" || verified.Data.Reference != reference || verified.Data.Amount != amount || verified.Data.Currency != "NGN" {
+	case err != nil || !paymentConfirmed(tx, reference, amount):
 		s.render(w, "billing-result.html", PageData{Title: "Payment result", Name: "failed", Success: "We could not confirm this payment. No Plus access was added. If you were charged, contact support with your Paystack receipt.", User: s.currentUser(r), CSRF: s.csrf(w, r)})
 		return
 	}
-	tx, err := s.db.BeginTx(r.Context(), nil)
-	if err != nil {
-		http.Error(w, "Unable to activate Plus.", 500)
+	if _, err := s.activatePlusPayment(r.Context(), reference); err != nil {
+		log.Printf("connectai: plus activation failed for %s: %v", reference, err)
+		http.Error(w, "Payment recorded but plan activation failed. Contact support.", 500)
 		return
-	}
-	defer tx.Rollback()
-	res, err := tx.Exec(`UPDATE plan_payments SET status='paid',paid_at=NOW() WHERE reference=$1 AND user_id=$2 AND status='pending'`, reference, owner)
-	if err != nil {
-		http.Error(w, "Unable to record payment.", 500)
-		return
-	}
-	changed, _ := res.RowsAffected()
-	if changed == 1 {
-		_, err = tx.Exec(`UPDATE users SET plan='plus',daily_limit=10000,plus_expires_at=GREATEST(COALESCE(plus_expires_at,NOW()),NOW())+INTERVAL '30 days' WHERE id=$1`, owner)
-		if err != nil {
-			http.Error(w, "Payment recorded but plan activation failed. Contact support.", 500)
-			return
-		}
-	}
-	if err = tx.Commit(); err != nil {
-		http.Error(w, "Unable to complete plan activation.", 500)
-		return
-	}
-	var email, name string
-	_ = s.db.QueryRow(`SELECT email,name FROM users WHERE id=$1`, owner).Scan(&email, &name)
-	if changed == 1 {
-		_, _ = s.db.Exec(`INSERT INTO notifications(user_id,title,message,kind) VALUES($1,$2,$3,'billing')`, owner, "Payment successful", "Your ConnectAI Plus payment was verified. Plus access is now active for 30 days.")
-		if err := s.sendPaymentSuccessEmail(name, email, reference, amount/100); err != nil {
-			log.Printf("connectai: payment confirmation email could not be sent to %s: %v", email, err)
-		}
 	}
 	s.render(w, "billing-result.html", PageData{Title: "Payment result", Name: "success", Success: "Your payment was verified successfully. ConnectAI Plus is active for 30 days. Check your registered email for the payment confirmation.", User: s.currentUser(r), CSRF: s.csrf(w, r)})
 }

@@ -76,7 +76,7 @@ func (n noListingFS) Open(name string) (http.File, error) {
 // until ctx is cancelled.
 func (s *Server) StartJanitor(ctx context.Context) {
 	go func() {
-		s.sweep()
+		s.sweep(ctx)
 		t := time.NewTicker(time.Hour)
 		defer t.Stop()
 		for {
@@ -84,13 +84,13 @@ func (s *Server) StartJanitor(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				s.sweep()
+				s.sweep(ctx)
 			}
 		}
 	}()
 }
 
-func (s *Server) sweep() {
+func (s *Server) sweep(ctx context.Context) {
 	for _, q := range []string{
 		`DELETE FROM sessions WHERE expires_at < NOW() - INTERVAL '1 day'`,
 		`DELETE FROM password_resets WHERE expires_at < NOW() - INTERVAL '1 day'`,
@@ -100,6 +100,8 @@ func (s *Server) sweep() {
 			log.Printf("connectai: cleanup failed: %v", err)
 		}
 	}
+	s.reconcilePayments(ctx)
+	s.plusLifecycle(ctx)
 	now := time.Now()
 	s.rateMu.Lock()
 	for k, v := range s.rates {

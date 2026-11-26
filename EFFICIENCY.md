@@ -38,3 +38,9 @@ Tune the limits via the constants at the top of `aitools.go`. Run `go test ./...
 - Graceful shutdown: in-progress requests finish on Ctrl+C or a deploy.
 - Payment-provider calls now time out after 20 seconds instead of waiting forever.
 - Bug fix: the database setup no longer fails on restart once `edit` usage rows exist.
+
+## Payments and Plus lifecycle (`internal/web/billing.go`)
+- New `POST /billing/webhook` grants Plus even if the customer never returns to the site. Signature-checked, idempotent, and shares one activation path with the browser callback.
+- The hourly job re-checks payments that stayed pending and marks abandoned ones failed.
+- Plus members get one reminder (in-app + email, respecting their email setting) 3 days before expiry, and an "ended" notice when they drop back to Free. New column `users.plus_reminder_for` is added automatically at startup.
+- Removed the four unused stylesheets that the redesign replaced (`auth.css`, `chat.css`, `redesign.css`, `studio.css`).

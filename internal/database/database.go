@@ -200,6 +200,8 @@ CREATE TABLE IF NOT EXISTS user_memories (
 );
 CREATE INDEX IF NOT EXISTS user_memories_user_idx ON user_memories(user_id,id DESC);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS memory_enabled BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS plus_reminder_for TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS plan_payments_pending_idx ON plan_payments(created_at) WHERE status='pending';
 `
 	_, err := db.Exec(schema)
 	return err
