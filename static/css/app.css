@@ -414,18 +414,75 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .version-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; font-size: 14px; }
 .version-row form { margin: 0; }
 
-/* ---------- Tour ---------- */
-.tour-overlay { position: fixed; inset: 0; z-index: 100; display: none; place-items: center; padding: 20px; background: rgb(20 15 8 / .55); backdrop-filter: blur(4px); }
-.tour-overlay.open { display: grid; }
-.tour-card { width: min(440px, 100%); padding: 28px; border-radius: 22px; background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow-lg); }
-.tour-card small { color: var(--accent); font-weight: 700; letter-spacing: .1em; font-size: 12px; }
-.tour-card h2 { font-size: 28px; margin: 8px 0; }
-.tour-card p { color: var(--muted); }
-.tour-progress { height: 4px; margin: 20px 0; border-radius: 999px; background: var(--surface-2); overflow: hidden; }
-.tour-progress span { display: block; height: 100%; width: 20%; background: var(--accent); transition: width .25s; }
-.tour-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.tour-actions > div { display: flex; gap: 8px; }
+/* ---------- Guided tour (spotlight) ---------- */
 .tour-nav-button { font-size: 14px; }
+.tour-link { background: none; border: 0; padding: 0; cursor: pointer; font: inherit; color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+.ct-root { position: fixed; inset: 0; z-index: 100; display: none; }
+.ct-root.open { display: block; }
+.ct-block { position: fixed; inset: 0; }                       /* stops clicks reaching the page behind */
+.ct-root.center .ct-block { background: rgb(20 15 8 / .62); backdrop-filter: blur(3px); }
+.ct-spot { position: fixed; display: none; border-radius: 16px; pointer-events: none;
+  box-shadow: 0 0 0 3px var(--accent), 0 0 0 9999px rgb(20 15 8 / .62);
+  transition: top .25s ease, left .25s ease, width .25s ease, height .25s ease; }
+.ct-card { position: fixed; width: min(380px, calc(100vw - 24px)); padding: 22px 22px 18px; border-radius: 22px; background: var(--surface); color: var(--text); border: 1px solid var(--line); box-shadow: var(--shadow-lg); animation: ct-rise .25s ease both; }
+.ct-root.center .ct-card { left: 50%; top: 50%; transform: translate(-50%, -50%); animation: none; }
+.ct-eyebrow { display: block; color: var(--accent); font-weight: 700; letter-spacing: .1em; font-size: 12px; }
+.ct-title { font-family: var(--display); font-size: 26px; line-height: 1.15; margin: 8px 0 6px; outline: none; }
+.ct-text { color: var(--muted); margin: 0; line-height: 1.55; }
+.ct-cta-row { margin-top: 14px; }
+.ct-dots { display: flex; gap: 6px; margin: 16px 0; }
+.ct-dots i { width: 7px; height: 7px; border-radius: 99px; background: var(--line-strong); transition: width .2s, background .2s; }
+.ct-dots i.done { background: var(--accent); opacity: .45; }
+.ct-dots i.on { width: 22px; background: var(--accent); }
+.ct-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.ct-actions > div { display: flex; gap: 8px; margin-left: auto; }
+.ct-skip { background: none; border: 0; padding: 8px 4px; color: var(--muted); font: inherit; font-size: 14px; cursor: pointer; }
+.ct-skip:hover { color: var(--text); }
+@keyframes ct-rise { from { opacity: 0; translate: 0 8px; } to { opacity: 1; translate: 0 0; } }
+@media (max-width: 640px) {   /* phones: the card becomes a bottom sheet so it never hides the highlighted item */
+  .ct-card { left: 12px !important; right: 12px; top: auto !important; bottom: calc(12px + env(safe-area-inset-bottom)); width: auto; transform: none !important; padding: 18px 18px 14px; }
+  .ct-root.center .ct-card { top: 50% !important; bottom: auto; transform: translateY(-50%) !important; }
+  .ct-title { font-size: 22px; }
+}
+.ct-invite { position: fixed; z-index: 90; left: 16px; bottom: calc(16px + env(safe-area-inset-bottom)); max-width: min(380px, calc(100vw - 32px)); display: flex; align-items: center; gap: 12px; padding: 12px 12px 12px 16px; background: var(--surface); border: 1px solid var(--line); border-radius: 18px; box-shadow: var(--shadow-lg); animation: ct-rise .35s ease both; }
+.ct-invite > span { font-size: 22px; }
+.ct-invite div { display: grid; line-height: 1.25; }
+.ct-invite small { color: var(--muted); }
+.ct-invite-x, .ci-banner-x { background: none; border: 0; font-size: 22px; line-height: 1; color: var(--muted); cursor: pointer; padding: 6px 8px; border-radius: 8px; }
+.ct-invite-x:hover, .ci-banner-x:hover { color: var(--text); background: var(--surface-2); }
+
+/* ---------- Install as app ---------- */
+[data-install-app][hidden] { display: none !important; }
+.nav-install { display: none; }
+.install-app-button { cursor: pointer; }
+@media (max-width: 900px) {
+  .nav-actions .install-app-button { display: none !important; }   /* phones use the entry inside the menu and the banner */
+  .nav-links > .nav-install { display: block; background: var(--accent-soft); color: var(--accent); border: 0; font: inherit; font-weight: 650; cursor: pointer; }
+  .nav-links > .nav-install[hidden] { display: none; }
+}
+.install-promo { display: grid; grid-template-columns: 1.1fr 1fr; gap: 28px; align-items: center; padding: clamp(22px, 4vw, 40px); border: 1px solid var(--line); border-radius: 24px; background: linear-gradient(135deg, var(--accent-soft), var(--surface)); }
+.install-promo h2 { font-size: clamp(26px, 4vw, 36px); margin: 8px 0; letter-spacing: -.02em; }
+.install-promo p { color: var(--muted); }
+.install-guides { display: grid; gap: 10px; }
+.install-guide { padding: 14px 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
+.install-guide ol { margin: 6px 0 0; padding-left: 20px; color: var(--muted); font-size: 14px; }
+@media (max-width: 820px) { .install-promo { grid-template-columns: 1fr; } }
+.ci-banner { position: fixed; z-index: 90; left: 12px; right: 12px; bottom: calc(12px + env(safe-area-inset-bottom)); max-width: 460px; margin-inline: auto; display: flex; align-items: center; gap: 12px; padding: 10px 8px 10px 12px; background: var(--surface); border: 1px solid var(--line); border-radius: 18px; box-shadow: var(--shadow-lg); animation: ct-rise .35s ease both; }
+.ci-banner img { border-radius: 10px; }
+.ci-banner div { display: grid; line-height: 1.25; margin-right: auto; }
+.ci-banner small { color: var(--muted); }
+.ci-backdrop { position: fixed; inset: 0; z-index: 110; display: grid; align-items: end; justify-items: center; background: rgb(20 15 8 / .55); backdrop-filter: blur(3px); }
+.ci-sheet { width: min(480px, 100%); max-height: 92vh; overflow: auto; padding: 24px 22px calc(22px + env(safe-area-inset-bottom)); background: var(--surface); color: var(--text); border-radius: 24px 24px 0 0; box-shadow: var(--shadow-lg); animation: ct-rise .25s ease both; }
+.ci-head { display: flex; gap: 14px; align-items: flex-start; }
+.ci-head img { border-radius: 12px; flex: none; }
+.ci-head h2 { font-family: var(--display); font-size: 24px; margin: 0 0 4px; }
+.ci-head p { margin: 0; color: var(--muted); }
+.ci-steps { list-style: none; counter-reset: ci; display: grid; gap: 12px; padding: 0; margin: 20px 0; }
+.ci-steps li { counter-increment: ci; display: flex; gap: 12px; align-items: flex-start; }
+.ci-steps li::before { content: counter(ci); flex: none; width: 26px; height: 26px; border-radius: 99px; display: grid; place-items: center; background: var(--accent); color: var(--accent-ink); font-weight: 700; font-size: 13px; }
+.ci-perks { margin: 0 0 18px; padding-left: 18px; color: var(--muted); font-size: 14px; }
+.ci-actions { display: flex; gap: 10px; justify-content: flex-end; }
+@media (min-width: 641px) { .ci-backdrop { align-items: center; } .ci-sheet { border-radius: 24px; } }
 
 /* ---------- Starter templates & rich answers ---------- */
 .starter-list { display: flex; flex-wrap: wrap; gap: 8px; }

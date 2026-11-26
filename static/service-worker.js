@@ -1,6 +1,6 @@
 /* ConnectAI Hub service worker: pre-caches the app shell, serves static files
    stale-while-revalidate, and shows a friendly page when a navigation fails offline. */
-const CACHE = "connectai-shell-v4";
+const CACHE = "connectai-shell-v5";
 const SHELL = [
   "/static/manifest.webmanifest",
   "/static/icons/mark.svg", "/static/icons/icon-192.png", "/static/icons/icon-512.png"

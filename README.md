@@ -15,6 +15,21 @@ go run .                    # http://localhost:8080
 
 Tables are created and updated automatically on startup (`internal/database/database.go`). The files in `migrations/` are the same changes as readable SQL history.
 
+## Install on a phone (PWA)
+
+ConnectAI Hub is an installable web app, so there is no app store step. It needs an **https://** address (or localhost).
+
+- **Android (Chrome/Edge/Samsung Internet):** tap *Install* (home page, Settings, mobile menu or the banner) or ⋮ → Install app.
+- **iPhone / iPad:** open in Safari → Share → Add to Home Screen. The Install button shows these steps automatically.
+- **Inside Facebook / Instagram / WhatsApp browsers:** the Install button tells the person to open the page in Safari or Chrome first.
+
+`static/js/install.js` handles all of this; `static/manifest.webmanifest` defines the icons and the long-press shortcuts (Study, Career, Website builder, Prompt library).
+For a Play Store listing, wrap the same site with PWABuilder or Bubblewrap (Trusted Web Activity); no code changes are needed.
+
+## Guided tour
+
+`static/js/tour.js`: signed-in members get a spotlight tour of the dashboard once per account (replay from **Take a tour** or Settings). Visitors on the home page get a small dismissible invitation, never a blocking pop-up. Edit the `memberSteps` and `visitorSteps` lists to change the content.
+
 ## Configuration
 
 Everything is an environment variable; `.env.example` lists them all with comments. The important ones:

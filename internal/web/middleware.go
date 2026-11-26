@@ -3,11 +3,17 @@ package web
 import (
 	"compress/gzip"
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"strings"
 	"sync"
 )
+
+func init() {
+	// Browsers expect this type for the install manifest; minimal containers have no mime.types file.
+	_ = mime.AddExtensionType(".webmanifest", "application/manifest+json")
+}
 
 // gzipPool reuses gzip writers so compression does not allocate on every request.
 var gzipPool = sync.Pool{New: func() any { return gzip.NewWriter(io.Discard) }}
