@@ -7,6 +7,8 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -35,15 +37,12 @@ func (p *egressProxy) start() (string, error) {
 		}
 		p.addr = l.Addr().String()
 		p.tr = newSafeTransport()
-		log.Printf("connectai: screenshot proxy listening on %s", p.addr)
 		go func() {
 			for {
 				c, err := l.Accept()
 				if err != nil {
-					log.Printf("connectai: screenshot proxy accept failed: %v", err)
 					return
 				}
-				log.Printf("connectai: screenshot proxy accepted browser connection from %s", c.RemoteAddr())
 				go p.handle(c)
 			}
 		}()
@@ -65,7 +64,7 @@ func (p *egressProxy) handle(c net.Conn) {
 		log.Printf("connectai: screenshot proxy could not read browser request: %v", err)
 		return
 	}
-	log.Printf("connectai: screenshot proxy received %s request for %s", req.Method, req.Host)
+	proxyDebugf("screenshot proxy received %s request for %s", req.Method, req.Host)
 	if req.Method == http.MethodConnect {
 		p.tunnel(c, br, req)
 		return
@@ -81,10 +80,15 @@ func (p *egressProxy) tunnel(c net.Conn, br *bufio.Reader, req *http.Request) {
 	up, err := safeDialContext(ctx, "tcp", req.Host)
 	if err != nil {
 		log.Printf("connectai: screenshot proxy CONNECT to %q failed: %v", req.Host, err)
-		_, _ = io.WriteString(c, "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
+		// 403 = refused by the safety rules; 502 = allowed but could not be reached (DNS, timeout…).
+		if strings.Contains(err.Error(), errBlockedAddress.Error()) || strings.Contains(err.Error(), "standard web ports") {
+			_, _ = io.WriteString(c, "HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n")
+		} else {
+			_, _ = io.WriteString(c, "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
+		}
 		return
 	}
-	log.Printf("connectai: screenshot proxy CONNECT to %q established", req.Host)
+	proxyDebugf("screenshot proxy CONNECT to %q established", req.Host)
 	defer up.Close()
 	_ = up.SetDeadline(time.Now().Add(proxyConnLifetime))
 	if _, err := io.WriteString(c, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
@@ -127,4 +131,12 @@ func (p *egressProxy) forward(c net.Conn, req *http.Request) {
 	resp.Body = io.NopCloser(io.LimitReader(resp.Body, proxyMaxDownBytes))
 	resp.Close = true
 	_ = resp.Write(c)
+}
+
+// proxyDebugf logs every proxied request. It is off by default (it would put the sites people
+// look at into your logs); set WEB_DEBUG=on while diagnosing screenshot problems.
+func proxyDebugf(format string, args ...any) {
+	if strings.EqualFold(os.Getenv("WEB_DEBUG"), "on") {
+		log.Printf("connectai: "+format, args...)
+	}
 }

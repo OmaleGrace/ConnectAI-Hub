@@ -11,6 +11,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -59,6 +60,32 @@ func NewClient(apiKey, model string) *Client {
 		fallback: fallback,
 		http:     &http.Client{Timeout: 75 * time.Second},
 	}
+}
+
+// geminiMaxOutputTokens is the largest answer one Gemini call may return. The default
+// (8192) is safe for every Gemini model; raise GEMINI_MAX_OUTPUT_TOKENS (up to 65536)
+// if your model supports longer answers.
+func geminiMaxOutputTokens() int {
+	n, err := strconv.Atoi(strings.TrimSpace(os.Getenv("GEMINI_MAX_OUTPUT_TOKENS")))
+	if err != nil || n < 2048 {
+		return 8192
+	}
+	if n > 65536 {
+		return 65536
+	}
+	return n
+}
+
+// Long returns a copy of the client for jobs that legitimately take minutes (building a
+// whole website). The normal 75 second client timeout is removed; the caller's context
+// is the only time limit, so the caller must always pass one with a deadline.
+func (c *Client) Long() *Client {
+	if c == nil {
+		return c
+	}
+	cp := *c
+	cp.http = &http.Client{}
+	return &cp
 }
 
 func firstEnv(key, fallback string) string {
@@ -209,8 +236,8 @@ func (c *Client) GenerateWithImages(ctx context.Context, instruction string, his
 	if maxOutputTokens < 256 {
 		maxOutputTokens = 2048
 	}
-	if maxOutputTokens > 8192 {
-		maxOutputTokens = 8192
+	if limit := geminiMaxOutputTokens(); maxOutputTokens > limit {
+		maxOutputTokens = limit
 	}
 	body.GenerationConfig.MaxOutputTokens = maxOutputTokens
 	for _, item := range history {

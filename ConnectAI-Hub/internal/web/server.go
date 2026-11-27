@@ -1,7 +1,6 @@
 package web
 
 import (
-	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -18,7 +17,6 @@ import (
 	"net"
 	"net/http"
 	"net/smtp"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -97,6 +95,8 @@ type WebsiteVersion struct {
 type WebsiteProject struct {
 	ID                           int64
 	Title, Prompt, HTML, CSS, JS string
+	Status                       string // ready | building | editing | failed
+	BuildStage, BuildError       string
 	CreatedAt, UpdatedAt         time.Time
 }
 type NotificationItem struct {
@@ -142,6 +142,7 @@ type Server struct {
 	db      *sql.DB
 	modules []Module
 	gemini  *ai.Client
+	siteGen textGenerator // tests replace the AI used by the website builder
 	rateMu  sync.Mutex
 	rates   map[string]rateEntry
 }
@@ -288,6 +289,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /builder/projects/{id}", s.websiteProjectPage)
 	s.mux.HandleFunc("POST /builder/projects/{id}/delete", s.deleteWebsiteProject)
 	s.mux.HandleFunc("GET /builder/projects/{id}/download", s.downloadWebsiteProject)
+	s.mux.HandleFunc("GET /builder/projects/{id}/status", s.websiteStatus)
 }
 func (s *Server) render(w http.ResponseWriter, name string, d PageData) {
 	// Render into a buffer first so a template error never sends a half-written page.
@@ -424,7 +426,8 @@ func (s *Server) websiteBuilderPage(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
-	rows, err := s.db.Query(`SELECT id,title,prompt,created_at,updated_at FROM website_projects WHERE user_id=$1 ORDER BY updated_at DESC LIMIT 30`, u.ID)
+	s.failInterruptedSiteJobs()
+	rows, err := s.db.Query(`SELECT id,title,prompt,status,created_at,updated_at FROM website_projects WHERE user_id=$1 ORDER BY updated_at DESC LIMIT 30`, u.ID)
 	if err != nil {
 		http.Error(w, "Unable to load your website projects.", http.StatusInternalServerError)
 		return
@@ -433,106 +436,13 @@ func (s *Server) websiteBuilderPage(w http.ResponseWriter, r *http.Request) {
 	projects := []WebsiteProject{}
 	for rows.Next() {
 		var p WebsiteProject
-		if rows.Scan(&p.ID, &p.Title, &p.Prompt, &p.CreatedAt, &p.UpdatedAt) == nil {
+		if rows.Scan(&p.ID, &p.Title, &p.Prompt, &p.Status, &p.CreatedAt, &p.UpdatedAt) == nil {
 			projects = append(projects, p)
 		}
 	}
 	var unread int64
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM notifications WHERE user_id=$1 AND is_read=FALSE`, u.ID).Scan(&unread)
 	s.render(w, "builder.html", PageData{Title: "AI Website Builder", Active: "builder", User: u, CSRF: s.csrf(w, r), WebsiteProjects: projects, BuilderPrompt: r.URL.Query().Get("prompt"), UnreadNotifications: unread, Success: r.URL.Query().Get("success"), Error: firstNonEmpty(r.URL.Query().Get("error"), r.URL.Query().Get("clarify"))})
-}
-
-func (s *Server) generateWebsite(w http.ResponseWriter, r *http.Request) {
-	u := s.currentUser(r)
-	if u == nil {
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
-		return
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, 12<<10)
-	if err := r.ParseForm(); err != nil || !s.validCSRF(r) {
-		http.Error(w, "Your form expired. Refresh and try again.", http.StatusForbidden)
-		return
-	}
-	prompt := strings.TrimSpace(r.FormValue("prompt"))
-	if len(prompt) < 5 || len(prompt) > 8000 {
-		http.Redirect(w, r, "/builder?error=Please+write+a+website+description+between+20+and+8000+characters.", http.StatusSeeOther)
-		return
-	}
-	if !s.allowRate("builder:"+fmt.Sprint(u.ID), 3, 10*time.Minute) {
-		http.Redirect(w, r, "/builder?error=Please+wait+before+generating+another+website.", http.StatusSeeOther)
-		return
-	}
-	if !s.withinDailyLimit(w, u.ID) {
-		return
-	}
-	var count int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM website_projects WHERE user_id=$1`, u.ID).Scan(&count); err != nil {
-		http.Error(w, "Unable to check project limit.", 500)
-		return
-	}
-	if count >= 30 {
-		http.Redirect(w, r, "/builder?error=You+have+reached+the+30+website+project+limit.", http.StatusSeeOther)
-		return
-	}
-
-	// Ask the selected workspace model to identify only genuinely blocking ambiguity.
-	assessmentCtx, assessmentCancel := context.WithTimeout(r.Context(), 35*time.Second)
-	assessmentPrompt := `Assess this website brief. If it is too vague to build a useful website, return exactly JSON {"ready":false,"questions":["..."],"reason":"..."}. Ask at most 3 short, essential questions. A brief is ready if its website type and purpose are reasonably inferable; do not demand optional details. If ready, return {"ready":true,"questions":[],"reason":""}. Brief: ` + prompt
-	assessment, assessmentErr := s.gemini.ForModule("website").GenerateWithLimits(assessmentCtx, "You assess website briefs. Return JSON only.", nil, assessmentPrompt, 0.1, 500)
-	assessmentCancel()
-	if assessmentErr == nil {
-		var verdict struct {
-			Ready     bool     `json:"ready"`
-			Questions []string `json:"questions"`
-			Reason    string   `json:"reason"`
-		}
-		cleanAssessment := extractJSONObject(assessment)
-		if json.Unmarshal([]byte(cleanAssessment), &verdict) == nil && !verdict.Ready {
-			message := strings.Join(verdict.Questions, "\n• ")
-			if message == "" {
-				message = verdict.Reason
-			}
-			http.Redirect(w, r, "/builder?clarify="+url.QueryEscape(message)+"&prompt="+url.QueryEscape(prompt), http.StatusSeeOther)
-			return
-		}
-	}
-	instruction := `You are a senior web designer and frontend developer. Build a polished, responsive, accessible website from the user's brief. Return ONLY valid JSON with exactly these string keys: title, html, css, js. html must contain only the body markup (no html/head/body tags); css must be standalone CSS; js must be vanilla JavaScript. Do not include markdown fences. Do not use external libraries, remote scripts, trackers, forms that submit to unknown endpoints, or requests to external services. Do not include secrets. Make all navigation internal anchors where possible. Use semantic HTML, responsive layout, accessible labels, keyboard-friendly controls, realistic placeholder copy, and a coherent visual design. Keep code compact enough to fit the output limit.`
-	ctx, cancel := context.WithTimeout(r.Context(), 420*time.Second)
-	defer cancel()
-	output, err := s.gemini.ForModule("website").GenerateWithLimits(ctx, instruction, nil, prompt, 0.45, 16384)
-	if err != nil {
-		log.Printf("connectai: website generation failed user_id=%d error=%v", u.ID, err)
-		http.Redirect(w, r, "/builder?error=The+AI+builder+could+not+finish+this+website.+Please+try+a+shorter+brief.", http.StatusSeeOther)
-		return
-	}
-	var generated struct {
-		Title string `json:"title"`
-		HTML  string `json:"html"`
-		CSS   string `json:"css"`
-		JS    string `json:"js"`
-	}
-	clean := extractJSONObject(output)
-	if err := json.Unmarshal([]byte(strings.TrimSpace(clean)), &generated); err != nil {
-		log.Printf("connectai: website generation returned invalid JSON user_id=%d", u.ID)
-		http.Redirect(w, r, "/builder?error=The+AI+returned+an+incomplete+website.+Please+try+again.", http.StatusSeeOther)
-		return
-	}
-	generated.Title = strings.TrimSpace(generated.Title)
-	generated.HTML = strings.TrimSpace(generated.HTML)
-	generated.CSS = strings.TrimSpace(generated.CSS)
-	generated.JS = strings.TrimSpace(generated.JS)
-	if generated.Title == "" || generated.HTML == "" || len(generated.HTML) > 90000 || len(generated.CSS) > 60000 || len(generated.JS) > 30000 {
-		http.Redirect(w, r, "/builder?error=The+generated+website+was+too+large+or+incomplete.+Try+a+smaller+brief.", http.StatusSeeOther)
-		return
-	}
-	var id int64
-	err = s.db.QueryRow(`INSERT INTO website_projects(user_id,title,prompt,html,css,js) VALUES($1,$2,$3,$4,$5,$6) RETURNING id`, u.ID, generated.Title, prompt, generated.HTML, generated.CSS, generated.JS).Scan(&id)
-	if err != nil {
-		http.Error(w, "Unable to save your website project.", 500)
-		return
-	}
-	_, _ = s.db.Exec(`INSERT INTO ai_usage(user_id,module_slug,request_type,input_characters,output_characters) VALUES($1,'website','website_build',$2,$3)`, u.ID, len(prompt), len(output))
-	http.Redirect(w, r, fmt.Sprintf("/builder/projects/%d", id), http.StatusSeeOther)
 }
 
 func extractJSONObject(raw string) string {
@@ -583,81 +493,8 @@ func (s *Server) loadOwnedWebsite(r *http.Request, u *User) (WebsiteProject, err
 		return WebsiteProject{}, err
 	}
 	var p WebsiteProject
-	err = s.db.QueryRow(`SELECT id,title,prompt,html,css,js,created_at,updated_at FROM website_projects WHERE id=$1 AND user_id=$2`, id, u.ID).Scan(&p.ID, &p.Title, &p.Prompt, &p.HTML, &p.CSS, &p.JS, &p.CreatedAt, &p.UpdatedAt)
+	err = s.db.QueryRow(`SELECT id,title,prompt,html,css,js,status,build_stage,build_error,created_at,updated_at FROM website_projects WHERE id=$1 AND user_id=$2`, id, u.ID).Scan(&p.ID, &p.Title, &p.Prompt, &p.HTML, &p.CSS, &p.JS, &p.Status, &p.BuildStage, &p.BuildError, &p.CreatedAt, &p.UpdatedAt)
 	return p, err
-}
-
-func (s *Server) editWebsiteProject(w http.ResponseWriter, r *http.Request) {
-	u := s.currentUser(r)
-	if u == nil {
-		http.Error(w, "Unauthorized", 401)
-		return
-	}
-	if !s.validCSRF(r) {
-		http.Error(w, "Invalid form token", 403)
-		return
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "Invalid request", 400)
-		return
-	}
-	instruction := strings.TrimSpace(r.FormValue("instruction"))
-	if len(instruction) < 4 || len(instruction) > 4000 {
-		http.Error(w, "Describe the change in 4–4,000 characters.", 400)
-		return
-	}
-	if !s.allowRate("builder-edit:"+fmt.Sprint(u.ID), 8, 10*time.Minute) {
-		http.Error(w, "Please wait before making more edits.", 429)
-		return
-	}
-	p, err := s.loadOwnedWebsite(r, u)
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), 420*time.Second)
-	defer cancel()
-	prompt := `Update this existing website according to the user's instruction. Preserve unrelated content and existing design. Return ONLY valid JSON with string keys title, html, css, js. html is body markup only. Do not add external libraries or network calls. Existing project JSON: ` + mustJSON(map[string]string{"title": p.Title, "html": p.HTML, "css": p.CSS, "js": p.JS}) + ` User change: ` + instruction
-	out, err := s.gemini.ForModule("website").GenerateWithLimits(ctx, "You are an expert frontend engineer making a focused patch to an existing website. Return complete updated files as JSON.", nil, prompt, 0.35, 16384)
-	if err != nil {
-		http.Error(w, "The edit took too long or the AI provider failed. Your existing version is unchanged; try a smaller change.", 502)
-		return
-	}
-	var next struct{ Title, HTML, CSS, JS string }
-	if err = json.Unmarshal([]byte(extractJSONObject(out)), &next); err != nil || strings.TrimSpace(next.HTML) == "" {
-		http.Error(w, "The AI returned an incomplete edit. Your existing version is unchanged.", 502)
-		return
-	}
-	if len(next.HTML) > 90000 || len(next.CSS) > 60000 || len(next.JS) > 30000 {
-		http.Error(w, "The updated website is too large. Try a smaller edit.", 413)
-		return
-	}
-	tx, err := s.db.Begin()
-	if err != nil {
-		http.Error(w, "Unable to save version", 500)
-		return
-	}
-	defer tx.Rollback()
-	_, err = tx.Exec(`INSERT INTO website_project_versions(project_id,user_id,title,html,css,js) VALUES($1,$2,$3,$4,$5,$6)`, p.ID, u.ID, p.Title, p.HTML, p.CSS, p.JS)
-	if err != nil {
-		http.Error(w, "Unable to preserve previous version", 500)
-		return
-	}
-	title := strings.TrimSpace(next.Title)
-	if title == "" {
-		title = p.Title
-	}
-	_, err = tx.Exec(`UPDATE website_projects SET title=$1,html=$2,css=$3,js=$4,updated_at=NOW() WHERE id=$5 AND user_id=$6`, title, next.HTML, next.CSS, next.JS, p.ID, u.ID)
-	if err != nil {
-		http.Error(w, "Unable to save edit", 500)
-		return
-	}
-	if err = tx.Commit(); err != nil {
-		http.Error(w, "Unable to save edit", 500)
-		return
-	}
-	http.Redirect(w, r, fmt.Sprintf("/builder/projects/%d?success=Changes+saved", p.ID), http.StatusSeeOther)
 }
 
 func (s *Server) saveWebsiteProject(w http.ResponseWriter, r *http.Request) {
@@ -670,7 +507,7 @@ func (s *Server) saveWebsiteProject(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid form token", 403)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 200<<10)
+	r.Body = http.MaxBytesReader(w, r.Body, 500<<10)
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "Invalid request", 400)
 		return
@@ -681,7 +518,7 @@ func (s *Server) saveWebsiteProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	html, css, js := r.FormValue("html"), r.FormValue("css"), r.FormValue("js")
-	if strings.TrimSpace(html) == "" || len(html) > 90000 || len(css) > 60000 || len(js) > 30000 {
+	if strings.TrimSpace(html) == "" || len(html) > maxSiteHTML || len(css) > maxSiteCSS || len(js) > maxSiteJS {
 		http.Error(w, "Invalid or oversized website source", 400)
 		return
 	}
@@ -695,7 +532,7 @@ func (s *Server) saveWebsiteProject(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Unable to preserve version", 500)
 		return
 	}
-	if _, err = tx.Exec(`UPDATE website_projects SET html=$1,css=$2,js=$3,updated_at=NOW() WHERE id=$4 AND user_id=$5`, html, css, js, p.ID, u.ID); err != nil {
+	if _, err = tx.Exec(`UPDATE website_projects SET html=$1,css=$2,js=$3,build_error='',updated_at=NOW() WHERE id=$4 AND user_id=$5 AND status='ready'`, html, css, js, p.ID, u.ID); err != nil {
 		http.Error(w, "Unable to save", 500)
 		return
 	}
@@ -742,7 +579,7 @@ func (s *Server) restoreWebsiteProject(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Unable to preserve current version", 500)
 		return
 	}
-	if _, err = tx.Exec(`UPDATE website_projects SET title=$1,html=$2,css=$3,js=$4,updated_at=NOW() WHERE id=$5 AND user_id=$6`, title, html, css, js, p.ID, u.ID); err != nil {
+	if _, err = tx.Exec(`UPDATE website_projects SET title=$1,html=$2,css=$3,js=$4,build_error='',updated_at=NOW() WHERE id=$5 AND user_id=$6 AND status='ready'`, title, html, css, js, p.ID, u.ID); err != nil {
 		http.Error(w, "Unable to restore", 500)
 		return
 	}
@@ -799,8 +636,9 @@ func (s *Server) websiteProjectPage(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	s.failInterruptedSiteJobs()
 	var p WebsiteProject
-	err = s.db.QueryRow(`SELECT id,title,prompt,html,css,js,created_at,updated_at FROM website_projects WHERE id=$1 AND user_id=$2`, id, u.ID).Scan(&p.ID, &p.Title, &p.Prompt, &p.HTML, &p.CSS, &p.JS, &p.CreatedAt, &p.UpdatedAt)
+	err = s.db.QueryRow(`SELECT id,title,prompt,html,css,js,status,build_stage,build_error,created_at,updated_at FROM website_projects WHERE id=$1 AND user_id=$2`, id, u.ID).Scan(&p.ID, &p.Title, &p.Prompt, &p.HTML, &p.CSS, &p.JS, &p.Status, &p.BuildStage, &p.BuildError, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -842,47 +680,6 @@ func (s *Server) deleteWebsiteProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, "/builder?success=Website+project+deleted.", http.StatusSeeOther)
-}
-
-func (s *Server) downloadWebsiteProject(w http.ResponseWriter, r *http.Request) {
-	u := s.currentUser(r)
-	if u == nil {
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
-		return
-	}
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
-	var p WebsiteProject
-	err = s.db.QueryRow(`SELECT title,html,css,js FROM website_projects WHERE id=$1 AND user_id=$2`, id, u.ID).Scan(&p.Title, &p.HTML, &p.CSS, &p.JS)
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
-	var buf bytes.Buffer
-	zw := zip.NewWriter(&buf)
-	files := map[string]string{"index.html": `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>` + template.HTMLEscapeString(p.Title) + `</title><link rel="stylesheet" href="style.css"></head><body>` + p.HTML + `<script src="script.js"></script></body></html>`, "style.css": p.CSS, "script.js": p.JS, "README.txt": "Generated by ConnectAI Hub. Review the code and test it before publishing."}
-	for name, content := range files {
-		f, e := zw.Create(name)
-		if e != nil {
-			http.Error(w, "Unable to package website.", 500)
-			return
-		}
-		if _, e = f.Write([]byte(content)); e != nil {
-			http.Error(w, "Unable to package website.", 500)
-			return
-		}
-	}
-	if err := zw.Close(); err != nil {
-		http.Error(w, "Unable to package website.", 500)
-		return
-	}
-	slug := fmt.Sprintf("connectai-website-%d.zip", id)
-	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", `attachment; filename="`+slug+`"`)
-	_, _ = w.Write(buf.Bytes())
 }
 
 func (s *Server) registerPage(w http.ResponseWriter, r *http.Request) {
@@ -2603,7 +2400,7 @@ func validEmail(email string) bool {
 		return false
 	}
 	parts := strings.SplitN(email, "@", 2)
-	return len(parts[0]) > 0 && strings.Contains(parts[1], ".") && !strings.ContainsAny(email, " 	\r\n")
+	return len(parts[0]) > 0 && strings.Contains(parts[1], ".") && !strings.ContainsAny(email, " \t\r\n")
 }
 
 func (s *Server) sendWelcomeEmail(name, to string) error {

@@ -133,7 +133,7 @@ func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error
 	}
 	ips, err := resolvePublic(ctx, host)
 	if err != nil {
-		return nil, fmt.Errorf("resolve public host %q: %w", host, err)
+		return nil, err
 	}
 	d := net.Dialer{
 		Timeout: 8 * time.Second,
@@ -157,10 +157,7 @@ func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error
 		}
 		lastErr = err
 	}
-	if lastErr != nil {
-		return nil, fmt.Errorf("connect to public host %q: %w", host, lastErr)
-	}
-	return nil, errors.New("no public address available")
+	return nil, lastErr
 }
 
 // newSafeTransport returns an HTTP transport that can only reach public sites.

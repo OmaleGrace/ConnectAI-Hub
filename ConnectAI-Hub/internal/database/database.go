@@ -200,6 +200,9 @@ CREATE TABLE IF NOT EXISTS website_project_versions (
  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS website_project_versions_idx ON website_project_versions(project_id,user_id,created_at DESC);
+ALTER TABLE website_projects ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'ready';
+ALTER TABLE website_projects ADD COLUMN IF NOT EXISTS build_stage TEXT NOT NULL DEFAULT '';
+ALTER TABLE website_projects ADD COLUMN IF NOT EXISTS build_error TEXT NOT NULL DEFAULT '';
 ALTER TABLE ai_usage DROP CONSTRAINT IF EXISTS ai_usage_request_type_check;
 ALTER TABLE ai_usage ADD CONSTRAINT ai_usage_request_type_check CHECK (request_type IN ('chat','file_analysis','regenerate','website_build','edit'));
 CREATE INDEX IF NOT EXISTS users_created_idx ON users(created_at DESC);

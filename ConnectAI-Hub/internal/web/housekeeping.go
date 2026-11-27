@@ -101,6 +101,7 @@ func (s *Server) sweep(ctx context.Context) {
 			log.Printf("connectai: cleanup failed: %v", err)
 		}
 	}
+	s.failInterruptedSiteJobs()
 	s.reconcilePayments(ctx)
 	s.plusLifecycle(ctx)
 	now := time.Now()

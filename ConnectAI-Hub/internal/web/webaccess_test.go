@@ -156,8 +156,14 @@ func TestFetchPageHappyPathAndRedirects(t *testing.T) {
 		http.Redirect(w, r, "http://169.254.169.254/latest/meta-data/", http.StatusFound)
 	})
 	mux.HandleFunc("/loop", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/loop", http.StatusFound) })
-	mux.HandleFunc("/pdf", func(w http.ResponseWriter, r *http.Request) { w.Header().Set("Content-Type", "application/pdf"); io.WriteString(w, "%PDF") })
-	mux.HandleFunc("/img", func(w http.ResponseWriter, r *http.Request) { w.Header().Set("Content-Type", "image/png"); io.WriteString(w, "x") })
+	mux.HandleFunc("/pdf", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/pdf")
+		io.WriteString(w, "%PDF")
+	})
+	mux.HandleFunc("/img", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		io.WriteString(w, "x")
+	})
 	mux.HandleFunc("/gone", func(w http.ResponseWriter, r *http.Request) { http.Error(w, "no", http.StatusForbidden) })
 	mux.HandleFunc("/json", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -447,5 +453,21 @@ func TestModuleInstructionDoesNotClaimBrowsing(t *testing.T) {
 	ins := moduleInstruction(Module{Slug: "study", Name: "Study AI"})
 	if strings.Contains(ins, "(browsing,") || !strings.Contains(ins, "WEB CONTEXT") {
 		t.Error("instruction should describe web context honestly")
+	}
+}
+
+func TestExtraChromeArgsCannotWeakenSafety(t *testing.T) {
+	got := extraChromeArgs("--no-zygote --single-process --proxy-server=http://evil:1 --host-resolver-rules=MAP --remote-debugging-port=9222 notaflag --user-data-dir=/tmp/x --disable-web-security --screenshot=/etc/x")
+	if strings.Join(got, " ") != "--no-zygote --single-process" {
+		t.Errorf("unexpected extra args: %v", got)
+	}
+	t.Setenv("CHROME_EXTRA_ARGS", "--no-zygote --proxy-server=x")
+	args := chromeArgs("/tmp/d", "127.0.0.1:1", "https://example.com/", "/tmp/d/o.png", shotOptions{})
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--no-zygote") || strings.Contains(joined, "--proxy-server=x") || !strings.Contains(joined, "--proxy-server=http://127.0.0.1:1") {
+		t.Errorf("extra args merged wrongly: %s", joined)
+	}
+	if args[len(args)-1] != "https://example.com/" {
+		t.Error("the target must stay the last argument")
 	}
 }

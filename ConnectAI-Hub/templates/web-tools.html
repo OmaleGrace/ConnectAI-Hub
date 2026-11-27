@@ -13,7 +13,7 @@
         <label><input type="checkbox" name="full_page" value="on"> Tall page capture</label>
       </div>
     </form>
-    {{if not .ScreenshotReady}}<p class="muted">URL reading is available. Screenshot capture is currently unavailable because Chrome/Chromium is not installed or web access is disabled on this server.</p>{{end}}
+    {{if not .ScreenshotReady}}<p class="settings-help">URL reading is available. Screenshot capture is currently unavailable because Chrome/Chromium is not installed or web access is disabled on this server.</p>{{end}}
   </section>
   {{if .WebError}}<div class="notice error-notice">{{.WebError}}</div>{{end}}
   {{if .ScreenshotError}}<div class="notice error-notice">Screenshot: {{.ScreenshotError}}</div>{{end}}
@@ -25,12 +25,12 @@
     {{if .WebPage.Headings}}<h3>Main headings</h3><ul>{{range .WebPage.Headings}}<li>{{.}}</li>{{end}}</ul>{{end}}
     <h3>Readable page content</h3><pre class="web-result-text" style="white-space:pre-wrap;overflow-wrap:anywhere">{{.WebPage.Text}}</pre>
     {{if .WebPage.Links}}<h3>Links found</h3><ul>{{range .WebPage.Links}}<li>{{.}}</li>{{end}}</ul>{{end}}
-    {{if .WebPage.Truncated}}<p class="muted">The page was long; displayed content has been shortened.</p>{{end}}
+    {{if .WebPage.Truncated}}<p class="settings-help">The page was long; displayed content has been shortened.</p>{{end}}
   </section>
   {{end}}
   {{if gt .ScreenshotID 0}}
-  <section class="settings-card" style="margin-top:1.5rem"><div class="section-heading"><div><span class="eyebrow">CAPTURE COMPLETE</span><h2>Website screenshot</h2></div><a class="button button-small" href="/screenshots/{{.ScreenshotID}}?download=1">Download image ↓</a></div><img src="/screenshots/{{.ScreenshotID}}" alt="Screenshot of {{.WebURL}}" style="display:block;width:100%;height:auto;border:1px solid var(--border);border-radius:12px"></section>
+  <section class="settings-card" style="margin-top:1.5rem"><div class="section-heading"><div><span class="eyebrow">CAPTURE COMPLETE</span><h2>Website screenshot</h2></div><a class="button button-small" href="/screenshots/{{.ScreenshotID}}?download=1">Download image ↓</a></div><img src="/screenshots/{{.ScreenshotID}}" alt="Screenshot of {{.WebURL}}" style="display:block;width:100%;height:auto;border:1px solid var(--line);border-radius:12px"></section>
   {{end}}
 </main>
-<style>.web-tool-options{display:flex;gap:1.25rem;align-items:center;flex-wrap:wrap;margin-top:1rem}.web-tool-options label{display:flex;gap:.45rem;align-items:center}.web-result-text{max-height:38rem;overflow:auto;padding:1rem;border:1px solid var(--border);border-radius:10px;background:var(--surface,transparent);font:inherit;font-size:.92rem}</style>
+<style>.web-tool-options{display:flex;gap:1.25rem;align-items:center;flex-wrap:wrap;margin-top:1rem}.web-tool-options label{display:flex;gap:.45rem;align-items:center}.web-result-text{max-height:38rem;overflow:auto;padding:1rem;border:1px solid var(--line);border-radius:10px;background:var(--surface,transparent);font:inherit;font-size:.92rem}</style>
 {{template "footer" .}}

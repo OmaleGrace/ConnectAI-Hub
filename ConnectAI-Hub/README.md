@@ -109,9 +109,20 @@ templates/ static/         pages, CSS, JS, icons, service worker
 
 See `EFFICIENCY.md` for the performance and quality changes already made.
 
+### If screenshots fail on your host
 
-## URL Search & Screenshot
+1. Set `WEB_DEBUG=on` and read the logs: you will see each request Chrome makes through the proxy, plus Chrome's own error output (`Chrome diagnostics:`).
+2. **No diagnostics and "took too long"**: the container is probably too small. Chromium needs roughly 500 MB of RAM and a 512 MB instance will be killed. Use a bigger instance, or set `CHROME_EXTRA_ARGS=--no-zygote --single-process`.
+3. **`No usable sandbox` / crashes on start**: set `CHROME_NO_SANDBOX=true` (the Docker image already does).
+4. **Proxy lines show `403`**: the address was refused by the safety rules (private IP or non-web port). `502` means it was allowed but could not be reached.
 
-Signed-in users can open `/web-tools` to inspect a public website URL. ConnectAI Hub extracts the page title, description, headings, readable text and outgoing links. Users can also request a desktop/mobile screenshot and download the captured image.
+## URL Search & Screenshot page
 
-Screenshot capture requires Chrome/Chromium on the server. The included Dockerfile installs Chromium and configures `CHROME_BIN=/usr/bin/chromium` plus `CHROME_NO_SANDBOX=true`. If deploying without the included Dockerfile, install Chromium and set `CHROME_BIN` to its executable path. Set `WEB_ACCESS=off` to disable URL reading and screenshots.
+Signed-in users can open `/web-tools` to inspect a public website URL: title, description, headings, readable text and outgoing links, plus an optional desktop/mobile screenshot they can download. It uses the same safety rules as the assistants (see above). Set `WEB_DEBUG=on` temporarily to log every request Chrome makes through the filtering proxy while diagnosing screenshot problems.
+
+
+## Website builder
+
+A build now runs in the background: submitting the form opens a progress page and the result appears when it is ready (you can leave the page and come back). The model writes plain sections instead of JSON, and an answer cut off by the length limit is continued automatically (up to 5 times), so large sites finish. Every finished site downloads as a ZIP that is ready to deploy: `index.html`, `css/style.css`, `js/script.js`, favicon, 404 page, robots.txt and a README with Netlify / Cloudflare Pages / GitHub Pages / Vercel / cPanel steps. Paste a link in the brief and the builder reads it and screenshots it as a design reference. AI edits run the same way and keep the previous version.
+
+Setting: `GEMINI_MAX_OUTPUT_TOKENS` (default 8192; raise only if your model supports longer answers). Builds time out after 10 minutes.

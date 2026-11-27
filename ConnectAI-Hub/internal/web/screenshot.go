@@ -94,6 +94,7 @@ func chromeArgs(dir, proxyAddr, target, out string, opt shotOptions) []string {
 		"--no-default-browser-check",
 		"--disable-extensions",
 		"--disable-sync",
+		"--disable-background-networking",
 		"--disable-component-update",
 		"--disable-default-apps",
 		"--disable-quic",
@@ -102,9 +103,9 @@ func chromeArgs(dir, proxyAddr, target, out string, opt shotOptions) []string {
 		"--user-data-dir=" + filepath.Join(dir, "profile"),
 		// Every request, including loopback, must go through our filtering proxy,
 		// and Chrome may not resolve names on its own.
-		"--proxy-server=http=" + proxyAddr + ";https=" + proxyAddr,
+		"--proxy-server=http://" + proxyAddr,
 		"--proxy-bypass-list=<-loopback>",
-		"--disable-background-networking",
+		"--host-resolver-rules=MAP * ~NOTFOUND",
 		"--window-size=" + strconv.Itoa(width) + "," + strconv.Itoa(height),
 		"--force-device-scale-factor=1",
 		"--virtual-time-budget=7000",
@@ -117,7 +118,32 @@ func chromeArgs(dir, proxyAddr, target, out string, opt shotOptions) []string {
 	if strings.EqualFold(os.Getenv("CHROME_NO_SANDBOX"), "true") || os.Getenv("CHROME_NO_SANDBOX") == "1" {
 		args = append(args, "--no-sandbox")
 	}
+	args = append(args, extraChromeArgs(os.Getenv("CHROME_EXTRA_ARGS"))...)
 	return append(args, target)
+}
+
+// extraChromeArgs lets the server operator add flags some hosts need (for example
+// "--no-zygote --single-process" on very small containers) without changing code. Flags
+// that would weaken the safety model (proxy, DNS, remote debugging, profile location,
+// web security, file access) are ignored.
+func extraChromeArgs(raw string) []string {
+	var out []string
+	for _, a := range strings.Fields(raw) {
+		l := strings.ToLower(a)
+		if !strings.HasPrefix(l, "--") {
+			continue
+		}
+		blocked := false
+		for _, bad := range []string{"--proxy", "--host-resolver", "--remote-debugging", "--user-data-dir", "--disable-web-security", "--allow-file-access", "--screenshot", "--headless", "--user-agent", "--load-extension", "--enable-automation", "--no-proxy"} {
+			if strings.HasPrefix(l, bad) {
+				blocked = true
+			}
+		}
+		if !blocked {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // captureScreenshot returns a JPEG of the page.
@@ -158,9 +184,7 @@ func captureScreenshot(ctx context.Context, rawURL string, opt shotOptions) ([]b
 
 	runCtx, cancel := context.WithTimeout(ctx, screenshotTimeout)
 	defer cancel()
-	args := chromeArgs(dir, proxyAddr, u.String(), out, opt)
-	log.Printf("connectai: starting screenshot browser=%q proxy=%q target_host=%q", bin, proxyAddr, u.Host)
-	cmd := exec.CommandContext(runCtx, bin, args...)
+	cmd := exec.CommandContext(runCtx, bin, chromeArgs(dir, proxyAddr, u.String(), out, opt)...)
 	var chromeStderr bytes.Buffer
 	cmd.Stderr = &chromeStderr
 	// A minimal environment: Chrome must never see the app's secrets.
@@ -292,6 +316,10 @@ func (s *Server) openWebToolURL(w http.ResponseWriter, r *http.Request) {
 	if raw != "" && !strings.Contains(raw, "://") {
 		raw = "https://" + raw
 	}
+	if !webAccessEnabled() {
+		s.renderWebToolError(w, r, u, raw, "Web access is turned off on this server.")
+		return
+	}
 	if !s.allowRate(fmt.Sprintf("web-tool:%d", u.ID), 12, 10*time.Minute) {
 		s.renderWebToolError(w, r, u, raw, "Please wait a few minutes before opening another URL.")
 		return
@@ -309,6 +337,11 @@ func (s *Server) openWebToolURL(w http.ResponseWriter, r *http.Request) {
 		ScreenshotReady: screenshotsAvailable(),
 	}
 	if r.FormValue("screenshot") == "on" {
+		if !s.allowRate(fmt.Sprintf("shot:%d", u.ID), 8, 10*time.Minute) {
+			data.ScreenshotError = "Screenshot limit reached; please wait a few minutes."
+			s.render(w, "web-tools.html", data)
+			return
+		}
 		opt := shotOptions{Mobile: r.FormValue("viewport") == "mobile", FullPage: r.FormValue("full_page") == "on"}
 		shotCtx, shotCancel := context.WithTimeout(r.Context(), screenshotTimeout+5*time.Second)
 		jpg, shotErr := captureScreenshot(shotCtx, raw, opt)
