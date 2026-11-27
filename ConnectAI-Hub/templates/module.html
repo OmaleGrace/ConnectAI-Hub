@@ -1,0 +1,46 @@
+{{template "head" .}}{{template "nav" .}}
+<main class="module-page wrap">
+  <a class="back-link" href="/dashboard">← All assistants</a>
+  <section class="module-hero">
+    <span class="tool-icon {{.Module.Color}} module-icon">{{.Module.Icon}}</span>
+    <div class="eyebrow">ConnectAI Hub workspace</div>
+    <h1>{{.Module.Name}}</h1>
+    <p>{{.Module.Description}}</p>
+    <div class="module-status"><span class="status-dot"></span> Conversation saved to your account</div>
+  </section>
+  <section class="module-content">
+    <div class="module-panel chat-panel">
+      <div class="chat-messages" id="chatMessages" aria-live="polite">
+        <div class="chat-empty" id="chatEmpty"><span>✦</span><b>Your conversation starts here.</b><p>Ask a question or describe what you’d like help with.</p></div>
+      </div>
+      <p class="chat-error" id="chatError" role="alert" hidden></p>
+      {{if or (eq .Module.Slug "documents") (eq .Module.Slug "data")}}
+      <form class="document-upload" id="documentUpload" data-module="{{.Module.Slug}}" data-csrf="{{.CSRF}}">
+        <div><strong>Analyse a file</strong><p>Upload a document or dataset (maximum 5 MB).</p></div>
+        <label for="documentFile">Choose file</label>
+        <input id="documentFile" name="document" type="file" accept=".txt,.md,.csv,.json,.log,.pdf,.docx,.xlsx,text/plain,text/csv,application/json,application/pdf" required>
+        <label class="sr-only" for="documentQuestion">What should the AI look for?</label>
+        <input id="documentQuestion" name="question" type="text" maxlength="4000" placeholder="e.g. Summarise the key points and findings">
+        <button class="button" id="analyzeButton" type="submit">Analyse file ↗</button>
+        <small>Supported: TXT, MD, CSV, JSON, LOG, PDF, DOCX and XLSX.</small>
+      </form>
+      {{end}}
+      <div class="quick-prompts" aria-label="Suggested starting prompts"><span class="quick-prompts-label">Try one of these</span><div class="quick-prompt-list">{{range .QuickPrompts}}<button type="button" class="quick-prompt" data-prompt="{{.}}">{{.}}</button>{{end}}</div></div>
+      <form class="chat-form" id="chatForm" data-module="{{.Module.Slug}}" data-csrf="{{.CSRF}}">
+        <label class="sr-only" for="chatInput">Your message</label>
+        <textarea id="chatInput" rows="2" maxlength="8000" data-initial-prompt="{{.Name}}" placeholder="Message your {{.Module.Name}} assistant…" required></textarea>
+        <div class="chat-form-bottom"><span>Enter to send · Shift+Enter for a new line. Paste a link and the assistant will read it. Don’t share passwords or API keys.</span><label class="shot-toggle" title="Take a screenshot of any link in your message and let the assistant look at it"><input type="checkbox" id="shotToggle"> 📷 Screenshot links</label><button class="button" id="sendButton" type="submit">Send message ↗</button></div>
+      </form>
+    </div>
+    <aside class="module-aside">
+      <div class="aside-card"><h3>What it can do</h3><div class="feature-list">{{range .Module.Features}}<div class="feature-row"><span>✓</span>{{.}}</div>{{end}}</div></div>
+      <div class="aside-card"><h3>Starter templates</h3><p class="settings-help" style="margin-top:0">Click one, then fill in the [brackets].</p><div class="starter-list" id="starterList"></div></div>
+      <div class="aside-card"><h3>Conversation</h3>
+        <label class="sr-only" for="chatSearch">Search this conversation</label><input id="chatSearch" class="chat-search" type="search" placeholder="Search this chat…">
+        <div class="chat-tools"><a href="/prompts">Prompt library</a><button type="button" id="exportChat">Export as Markdown</button><button type="button" id="regenerateLast" disabled>Regenerate last answer</button><button type="button" class="danger-tool" id="clearChat">Clear chat</button></div>
+      </div>
+      <div class="aside-card"><details class="workspace-settings"><summary>Workspace preferences</summary><div class="workspace-settings-body"><label for="workspaceInstructions">Custom instructions</label><textarea id="workspaceInstructions" maxlength="1200" placeholder="Example: Explain concepts in simple steps and give one example.">{{.WorkspaceInstructions}}</textarea><label for="workspaceTemperature">Creativity <span id="temperatureValue">{{printf "%.1f" .WorkspaceTemperature}}</span></label><input id="workspaceTemperature" type="range" min="0.1" max="1.0" step="0.1" value="{{printf "%.1f" .WorkspaceTemperature}}"><label class="pin-workspace"><input id="workspacePinned" type="checkbox" {{if .WorkspacePinned}}checked{{end}}> Pin this workspace on my dashboard</label><button class="button button-ghost button-small" id="saveWorkspacePreferences" type="button">Save preferences</button><small id="workspaceSaveStatus" aria-live="polite"></small></div></details></div>
+    </aside>
+  </section>
+</main>
+{{template "footer" .}}

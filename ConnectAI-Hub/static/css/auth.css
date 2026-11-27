@@ -1,0 +1,41 @@
+/* Batch 2 additions */
+.auth-wrap{min-height:72vh;display:grid;place-items:center;padding:55px 20px 80px}.auth-card{width:min(470px,100%);padding:34px;border:1px solid var(--line);border-radius:18px;background:linear-gradient(145deg,#151e33,#101729);box-shadow:0 25px 70px #0005}.auth-card>.back-link{display:inline-block;margin-bottom:30px}.auth-card h1{font:800 34px/1.18 var(--display);letter-spacing:-1.4px;margin:12px 0}.auth-intro{color:var(--muted);font-size:13px;margin:0 0 25px}.auth-form{display:grid;gap:17px}.auth-form label{display:grid;gap:7px;font-size:11px;font-weight:600;color:#d5dced}.auth-form label small{font-weight:400;color:var(--muted)}.auth-form input{width:100%;height:45px;border:1px solid var(--line);border-radius:9px;background:#0b1221;color:white;padding:0 13px;font:13px var(--font);outline:none}.auth-form input:focus{border-color:#9b86ff99;box-shadow:0 0 0 3px #8f78ff15}.auth-submit{width:100%;justify-content:center;margin-top:5px}.auth-switch{text-align:center;color:var(--muted);font-size:11px;margin:22px 0 0}.auth-switch a{color:#b6a5ff;font-weight:700}.form-error{border:1px solid #ff8a8a44;background:#ff777710;color:#ffb2b2;padding:11px 13px;border-radius:8px;font-size:11px;margin:0 0 17px}.logout-form{display:inline}.logout-button{background:none;border:0;padding:0;font:inherit;cursor:pointer}
+@media(max-width:650px){.auth-card{padding:25px 20px}.auth-card h1{font-size:29px}}
+
+.password-field{display:flex;align-items:center;position:relative}.password-field input{padding-right:64px}.toggle-password{position:absolute;right:9px;top:50%;transform:translateY(-50%);border:0;background:transparent;color:#b9aaff;font-size:11px;font-weight:700;cursor:pointer;padding:7px}.live-feedback{font-size:10px;color:var(--muted);min-height:12px}.live-feedback.valid{color:#78dfad}.live-feedback.invalid{color:#ffadad}.forgot-link{font-size:11px;color:#b9aaff;text-align:right;margin-top:-9px}.danger-card{border-color:#ff777744}.danger-button{background:#9f343f;color:white;border:0;border-radius:8px;padding:12px 18px;font-weight:700;cursor:pointer}.settings-success{border:1px solid #5edba044;background:#5edba012;color:#9aefc4;padding:11px 13px;border-radius:8px;font-size:12px;margin:0 0 17px}.settings-card small{color:var(--muted)}
+
+/* Settings form controls must follow the selected theme. The shared auth form
+   defaults are dark, so explicitly use the theme tokens inside settings. */
+.settings-card .auth-form input,
+.settings-card .auth-form textarea,
+.settings-card .auth-form select,
+.settings-card input:not([type="hidden"]),
+.settings-card textarea,
+.settings-card select {
+  background: var(--input-bg, #0b1221);
+  color: var(--text, #f4f6ff);
+  border: 1px solid var(--line);
+  caret-color: var(--text, #f4f6ff);
+}
+.settings-card .auth-form input::placeholder,
+.settings-card input::placeholder,
+.settings-card textarea::placeholder {
+  color: var(--muted, #9ba7c0);
+  opacity: 1;
+}
+.settings-card .auth-form input:focus,
+.settings-card input:not([type="hidden"]):focus,
+.settings-card textarea:focus,
+.settings-card select:focus {
+  border-color: #9b86ff;
+  outline: none;
+  box-shadow: 0 0 0 3px #8f78ff20;
+}
+.settings-card input:disabled {
+  opacity: 1;
+  color: var(--text, #f4f6ff);
+  -webkit-text-fill-color: var(--text, #f4f6ff);
+  background: var(--input-bg, #0b1221);
+}
+.settings-card .password-field { width: 100%; }
+.settings-card .password-field input { min-width: 0; }

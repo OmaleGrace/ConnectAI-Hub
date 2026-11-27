@@ -1,0 +1,36 @@
+{{template "head" .}}{{template "nav" .}}
+<main class="wrap page-shell">
+  <div class="page-heading"><div><span class="eyebrow">WEB RESEARCH TOOLS</span><h1>URL Search &amp; Screenshot</h1><p>Open a public website, inspect its readable content, and capture a desktop or mobile screenshot.</p></div></div>
+  <section class="settings-card">
+    <form method="post" action="/web-tools/open" class="settings-form">
+      <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+      <label for="webURL">Website URL</label>
+      <input id="webURL" name="url" type="url" value="{{.WebURL}}" placeholder="https://example.com" required maxlength="2048">
+      <div class="builder-form-footer"><small>Public HTTP and HTTPS websites only. Pages requiring login may not be accessible.</small><button class="button" type="submit">Open website ↗</button></div>
+      <div class="web-tool-options">
+        <label><input type="checkbox" name="screenshot" value="on" checked {{if not .ScreenshotReady}}disabled{{end}}> Capture screenshot</label>
+        <label>Viewport <select name="viewport"><option value="desktop">Desktop</option><option value="mobile">Mobile</option></select></label>
+        <label><input type="checkbox" name="full_page" value="on"> Tall page capture</label>
+      </div>
+    </form>
+    {{if not .ScreenshotReady}}<p class="muted">URL reading is available. Screenshot capture is currently unavailable because Chrome/Chromium is not installed or web access is disabled on this server.</p>{{end}}
+  </section>
+  {{if .WebError}}<div class="notice error-notice">{{.WebError}}</div>{{end}}
+  {{if .ScreenshotError}}<div class="notice error-notice">Screenshot: {{.ScreenshotError}}</div>{{end}}
+  {{if .WebPage}}
+  <section class="settings-card" style="margin-top:1.5rem">
+    <span class="eyebrow">PAGE RESULTS</span><h2>{{if .WebPage.Title}}{{.WebPage.Title}}{{else}}{{.WebPage.FinalURL}}{{end}}</h2>
+    <p><a href="{{.WebPage.FinalURL}}" target="_blank" rel="noopener noreferrer">{{.WebPage.FinalURL}}</a></p>
+    {{if .WebPage.Description}}<p>{{.WebPage.Description}}</p>{{end}}
+    {{if .WebPage.Headings}}<h3>Main headings</h3><ul>{{range .WebPage.Headings}}<li>{{.}}</li>{{end}}</ul>{{end}}
+    <h3>Readable page content</h3><pre class="web-result-text" style="white-space:pre-wrap;overflow-wrap:anywhere">{{.WebPage.Text}}</pre>
+    {{if .WebPage.Links}}<h3>Links found</h3><ul>{{range .WebPage.Links}}<li>{{.}}</li>{{end}}</ul>{{end}}
+    {{if .WebPage.Truncated}}<p class="muted">The page was long; displayed content has been shortened.</p>{{end}}
+  </section>
+  {{end}}
+  {{if gt .ScreenshotID 0}}
+  <section class="settings-card" style="margin-top:1.5rem"><div class="section-heading"><div><span class="eyebrow">CAPTURE COMPLETE</span><h2>Website screenshot</h2></div><a class="button button-small" href="/screenshots/{{.ScreenshotID}}?download=1">Download image ↓</a></div><img src="/screenshots/{{.ScreenshotID}}" alt="Screenshot of {{.WebURL}}" style="display:block;width:100%;height:auto;border:1px solid var(--border);border-radius:12px"></section>
+  {{end}}
+</main>
+<style>.web-tool-options{display:flex;gap:1.25rem;align-items:center;flex-wrap:wrap;margin-top:1rem}.web-tool-options label{display:flex;gap:.45rem;align-items:center}.web-result-text{max-height:38rem;overflow:auto;padding:1rem;border:1px solid var(--border);border-radius:10px;background:var(--surface,transparent);font:inherit;font-size:.92rem}</style>
+{{template "footer" .}}
