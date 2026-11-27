@@ -149,7 +149,7 @@ func (c *Client) record(eventType, model string, started time.Time) {
 // GenerateWithPDF sends a PDF as Gemini inline data. The caller enforces upload limits.
 func (c *Client) GenerateWithPDF(ctx context.Context, instruction string, history []Message, prompt string, pdf []byte) (string, error) {
 	if c.openRouter {
-		return c.openRouterGenerate(ctx, instruction, history, prompt, 2048, 0.4, pdf)
+		return c.openRouterGenerate(ctx, instruction, history, prompt, 2048, 0.4, pdf, nil)
 	}
 	if c.apiKey == "" {
 		return "", fmt.Errorf("AI provider is not configured: set OPENROUTER_API_KEY or GEMINI_API_KEY")
@@ -182,10 +182,21 @@ func (c *Client) GenerateWithTemperature(ctx context.Context, instruction string
 	return c.GenerateWithLimits(ctx, instruction, history, prompt, temperature, 2048)
 }
 
+// Image is a picture (for example a website screenshot) sent to a vision-capable model.
+type Image struct {
+	MimeType string
+	Data     []byte
+}
+
 // GenerateWithLimits allows larger structured outputs for tasks such as website generation.
 func (c *Client) GenerateWithLimits(ctx context.Context, instruction string, history []Message, prompt string, temperature float64, maxOutputTokens int) (string, error) {
+	return c.GenerateWithImages(ctx, instruction, history, prompt, temperature, maxOutputTokens, nil)
+}
+
+// GenerateWithImages is GenerateWithLimits plus optional images attached to the final user turn.
+func (c *Client) GenerateWithImages(ctx context.Context, instruction string, history []Message, prompt string, temperature float64, maxOutputTokens int, images []Image) (string, error) {
 	if c.openRouter {
-		return c.openRouterGenerate(ctx, instruction, history, prompt, maxOutputTokens, temperature, nil)
+		return c.openRouterGenerate(ctx, instruction, history, prompt, maxOutputTokens, temperature, nil, images)
 	}
 	if c.apiKey == "" {
 		return "", fmt.Errorf("AI provider is not configured: set OPENROUTER_API_KEY or GEMINI_API_KEY")
@@ -212,7 +223,14 @@ func (c *Client) GenerateWithLimits(ctx context.Context, instruction string, his
 		}
 		body.Contents = append(body.Contents, content{Role: item.Role, Parts: []part{{Text: text}}})
 	}
-	body.Contents = append(body.Contents, content{Role: "user", Parts: []part{{Text: prompt}}})
+	last := content{Role: "user", Parts: []part{{Text: prompt}}}
+	for _, img := range images {
+		if len(img.Data) == 0 {
+			continue
+		}
+		last.Parts = append(last.Parts, part{InlineData: &inlineData{MimeType: img.MimeType, Data: base64.StdEncoding.EncodeToString(img.Data)}})
+	}
+	body.Contents = append(body.Contents, last)
 	return c.send(ctx, body)
 }
 
@@ -329,10 +347,10 @@ func (c *Client) request(ctx context.Context, model string, body requestBody) (s
 
 // OpenRouter uses its OpenAI-compatible Chat Completions endpoint. The same
 // client is shared by all seven workspaces, keeping provider configuration central.
-func (c *Client) openRouterGenerate(ctx context.Context, instruction string, history []Message, prompt string, maxTokens int, temperature float64, pdf []byte) (string, error) {
+func (c *Client) openRouterGenerate(ctx context.Context, instruction string, history []Message, prompt string, maxTokens int, temperature float64, pdf []byte, images []Image) (string, error) {
 	// An empty assistant message is often a provider/model failure, not a
 	// successful response. Retry it and then try the configured fallback.
-	answer, err := c.openRouterGenerateOnce(ctx, instruction, history, prompt, maxTokens, temperature, pdf)
+	answer, err := c.openRouterGenerateOnce(ctx, instruction, history, prompt, maxTokens, temperature, pdf, images)
 	if err == nil {
 		return answer, nil
 	}
@@ -345,7 +363,7 @@ func (c *Client) openRouterGenerate(ctx context.Context, instruction string, his
 			return "", ctx.Err()
 		case <-timer.C:
 		}
-		if answer2, retryErr := c.openRouterGenerateOnce(ctx, instruction, history, prompt, maxTokens, temperature, pdf); retryErr == nil {
+		if answer2, retryErr := c.openRouterGenerateOnce(ctx, instruction, history, prompt, maxTokens, temperature, pdf, images); retryErr == nil {
 			log.Printf("connectai: OpenRouter retry succeeded model=%s", c.model)
 			return answer2, nil
 		} else {
@@ -359,7 +377,7 @@ func (c *Client) openRouterGenerate(ctx context.Context, instruction string, his
 		fallbackClient := *c
 		fallbackClient.model = fallback
 		log.Printf("connectai: OpenRouter primary failed model=%s; trying fallback=%s", c.model, fallback)
-		if answer2, fallbackErr := fallbackClient.openRouterGenerateOnce(ctx, instruction, history, prompt, maxTokens, temperature, pdf); fallbackErr == nil {
+		if answer2, fallbackErr := fallbackClient.openRouterGenerateOnce(ctx, instruction, history, prompt, maxTokens, temperature, pdf, images); fallbackErr == nil {
 			log.Printf("connectai: OpenRouter fallback succeeded primary=%s fallback=%s", c.model, fallback)
 			return answer2, nil
 		} else {
@@ -389,7 +407,7 @@ func isOpenRouterRetryable(err error) bool {
 	return false
 }
 
-func (c *Client) openRouterGenerateOnce(ctx context.Context, instruction string, history []Message, prompt string, maxTokens int, temperature float64, pdf []byte) (string, error) {
+func (c *Client) openRouterGenerateOnce(ctx context.Context, instruction string, history []Message, prompt string, maxTokens int, temperature float64, pdf []byte, images []Image) (string, error) {
 	type message struct {
 		Role    string `json:"role"`
 		Content any    `json:"content"`
@@ -410,6 +428,9 @@ func (c *Client) openRouterGenerateOnce(ctx context.Context, instruction string,
 			Filename string `json:"filename"`
 			FileData string `json:"file_data"`
 		} `json:"file,omitempty"`
+		ImageURL *struct {
+			URL string `json:"url"`
+		} `json:"image_url,omitempty"`
 	}
 	body := request{Model: c.model, MaxTokens: maxTokens, Temperature: temperature}
 	if body.MaxTokens < 256 {
@@ -452,6 +473,19 @@ func (c *Client) openRouterGenerateOnce(ctx context.Context, instruction string,
 			FileData string `json:"file_data"`
 		}{Filename: "uploaded-document.pdf", FileData: data}
 		body.Messages = append(body.Messages, message{Role: "user", Content: []contentPart{{Type: "text", Text: prompt}, part}})
+	} else if len(images) > 0 {
+		parts := []contentPart{{Type: "text", Text: prompt}}
+		for _, img := range images {
+			if len(img.Data) == 0 {
+				continue
+			}
+			p := contentPart{Type: "image_url"}
+			p.ImageURL = &struct {
+				URL string `json:"url"`
+			}{URL: "data:" + img.MimeType + ";base64," + base64.StdEncoding.EncodeToString(img.Data)}
+			parts = append(parts, p)
+		}
+		body.Messages = append(body.Messages, message{Role: "user", Content: parts})
 	} else {
 		body.Messages = append(body.Messages, message{Role: "user", Content: prompt})
 	}

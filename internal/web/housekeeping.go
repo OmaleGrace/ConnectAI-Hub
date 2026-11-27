@@ -95,6 +95,7 @@ func (s *Server) sweep(ctx context.Context) {
 		`DELETE FROM sessions WHERE expires_at < NOW() - INTERVAL '1 day'`,
 		`DELETE FROM password_resets WHERE expires_at < NOW() - INTERVAL '1 day'`,
 		`DELETE FROM phone_verification_codes WHERE expires_at < NOW()`,
+		`DELETE FROM web_screenshots WHERE created_at < NOW() - INTERVAL '30 days'`,
 	} {
 		if _, err := s.db.Exec(q); err != nil {
 			log.Printf("connectai: cleanup failed: %v", err)

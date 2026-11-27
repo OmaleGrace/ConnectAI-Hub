@@ -98,6 +98,17 @@ CREATE TABLE IF NOT EXISTS password_resets (
 );
 CREATE INDEX IF NOT EXISTS password_resets_user_id_idx ON password_resets(user_id);
 CREATE INDEX IF NOT EXISTS sessions_expires_at_idx ON sessions(expires_at);
+CREATE TABLE IF NOT EXISTS web_screenshots (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    module_slug TEXT NOT NULL DEFAULT '',
+    url TEXT NOT NULL,
+    mime TEXT NOT NULL DEFAULT 'image/jpeg',
+    data BYTEA NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS web_screenshots_user_idx ON web_screenshots(user_id, id DESC);
+
 CREATE TABLE IF NOT EXISTS ai_messages (
     id BIGSERIAL PRIMARY KEY,
     user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

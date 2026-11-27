@@ -43,6 +43,10 @@ type User struct {
 }
 type PageData struct {
 	Title, Active, CSRF, Error, Success, Name, BuilderPrompt string
+	WebURL, WebError, ScreenshotError                        string
+	WebPage                                                  *Page
+	ScreenshotID                                             int64
+	ScreenshotReady                                          bool
 	UsageTotal, UsageMonth                                   int64
 	DailyUsed, DailyRemaining, UserDailyLimit                int64
 	UserPlan                                                 string
@@ -264,6 +268,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /login", s.login)
 	s.mux.HandleFunc("POST /logout", s.logout)
 	s.mux.HandleFunc("POST /api/modules/{slug}/chat", s.chat)
+	s.mux.HandleFunc("GET /screenshots/{id}", s.serveScreenshot)
 	s.mux.HandleFunc("POST /api/modules/{slug}/regenerate", s.regenerate)
 	s.mux.HandleFunc("POST /api/modules/{slug}/edit", s.editMessage)
 	s.mux.HandleFunc("POST /api/modules/{slug}/feedback", s.saveMessageFeedback)
@@ -272,6 +277,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/modules/{slug}/messages", s.messages)
 	s.mux.HandleFunc("DELETE /api/modules/{slug}/messages", s.clearMessages)
 	s.mux.HandleFunc("POST /api/modules/{slug}/analyze", s.analyzeUpload)
+	s.mux.HandleFunc("GET /web-tools", s.webToolsPage)
+	s.mux.HandleFunc("POST /web-tools/open", s.openWebToolURL)
 	s.mux.HandleFunc("GET /builder", s.websiteBuilderPage)
 	s.mux.HandleFunc("POST /builder/generate", s.generateWebsite)
 	s.mux.HandleFunc("POST /builder/projects/{id}/edit", s.editWebsiteProject)
@@ -1195,8 +1202,9 @@ func (s *Server) updatePassword(w http.ResponseWriter, r *http.Request) {
 }
 
 type chatRequest struct {
-	Message string `json:"message"`
-	CSRF    string `json:"csrf_token"`
+	Message    string `json:"message"`
+	CSRF       string `json:"csrf_token"`
+	Screenshot string `json:"screenshot"` // "on" = always screenshot pasted links; otherwise automatic
 }
 type chatResponse struct {
 	MessageID     int64  `json:"message_id,omitempty"`
@@ -1946,14 +1954,20 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	}
 	instruction, temperature, history := s.prepareChat(u.ID, module, 0)
 
+	// Links in the message are opened (and screenshotted when asked) before the AI call.
+	wc := s.buildWebContext(r.Context(), u.ID, module.Slug, prompt, input.Screenshot)
+	if wc.Used {
+		instruction += webInstruction
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 80*time.Second)
 	defer cancel()
-	answer, err := s.gemini.ForModule(module.Slug).GenerateWithTemperature(ctx, instruction, history, prompt, temperature)
+	answer, err := s.generateWithWeb(ctx, module.Slug, instruction, history, wc, temperature, 2048)
 	if err != nil {
 		log.Printf("connectai: Gemini chat request failed: %v", err)
 		http.Error(w, safeAIError(err), http.StatusBadGateway)
 		return
 	}
+	answer += wc.Footer
 	userMsgID, responseID, err := s.saveExchange(u.ID, module.Slug, prompt, answer, "chat", len(prompt))
 	if err != nil {
 		log.Printf("connectai: save chat exchange: %v", err)
@@ -2003,14 +2017,20 @@ func (s *Server) regenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	instruction, temperature, history := s.prepareChat(u.ID, module, messageID)
+	// Links in the message are opened (and screenshotted when asked) before the AI call.
+	wc := s.buildWebContext(r.Context(), u.ID, module.Slug, prompt, "")
+	if wc.Used {
+		instruction += webInstruction
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 80*time.Second)
 	defer cancel()
-	answer, err := s.gemini.ForModule(module.Slug).GenerateWithTemperature(ctx, instruction, history, prompt, temperature)
+	answer, err := s.generateWithWeb(ctx, module.Slug, instruction, history, wc, temperature, 2048)
 	if err != nil {
 		log.Printf("connectai: Gemini regeneration failed: %v", err)
 		http.Error(w, safeAIError(err), http.StatusBadGateway)
 		return
 	}
+	answer += wc.Footer
 	tx, err := s.db.Begin()
 	if err != nil {
 		http.Error(w, "Unable to save the new response.", 500)
@@ -2094,14 +2114,20 @@ func (s *Server) editMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	instruction, temperature, history := s.prepareChat(u.ID, module, in.MessageID)
+	// Links in the message are opened (and screenshotted when asked) before the AI call.
+	wc := s.buildWebContext(r.Context(), u.ID, module.Slug, prompt, "")
+	if wc.Used {
+		instruction += webInstruction
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 80*time.Second)
 	defer cancel()
-	answer, err := s.gemini.ForModule(module.Slug).GenerateWithTemperature(ctx, instruction, history, prompt, temperature)
+	answer, err := s.generateWithWeb(ctx, module.Slug, instruction, history, wc, temperature, 2048)
 	if err != nil {
 		log.Printf("connectai: Gemini edit request failed: %v", err)
 		http.Error(w, safeAIError(err), http.StatusBadGateway)
 		return
 	}
+	answer += wc.Footer
 	// One atomic statement: drop everything after the edited prompt, update the
 	// prompt, store the new answer and record usage.
 	var newID int64
@@ -2462,6 +2488,9 @@ func (s *Server) clearMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, err = s.db.Exec(`DELETE FROM ai_messages WHERE user_id=$1 AND module_slug=$2`, u.ID, r.PathValue("slug"))
+	if err == nil {
+		_, err = s.db.Exec(`DELETE FROM web_screenshots WHERE user_id=$1 AND module_slug=$2`, u.ID, r.PathValue("slug"))
+	}
 	if err != nil {
 		http.Error(w, "Unable to clear this conversation.", http.StatusInternalServerError)
 		return
@@ -2491,7 +2520,7 @@ Core rules:
 - Format replies in clean Markdown: short paragraphs, bullet or numbered lists for steps, tables for comparisons, and fenced code blocks for code or templates. Avoid walls of text.
 - Match the user's level and language. Use simple wording unless the user is clearly an expert.
 - If the request is ambiguous, make a reasonable assumption, state it in one line, and proceed. Ask at most one focused follow-up question, and only when you truly cannot proceed.
-- Never claim to have performed actions you cannot perform (browsing, sending, saving, running code). Never invent facts, sources, statistics, quotes or credentials; say when you are unsure.
+- Never claim to have performed actions you cannot perform (logging in to sites, sending, saving, running code). You only know what a web page contains when the message includes a WEB CONTEXT block or an attached screenshot; otherwise say you have not opened the link. Never invent facts, sources, statistics, quotes or credentials; say when you are unsure.
 - Protect privacy: do not request passwords, API keys or other secrets.
 - If a request is outside your specialty, say so briefly and point to the most relevant ConnectAI Hub assistant.
 - Finish longer answers with a short "Next step" suggestion.
@@ -2574,7 +2603,7 @@ func validEmail(email string) bool {
 		return false
 	}
 	parts := strings.SplitN(email, "@", 2)
-	return len(parts[0]) > 0 && strings.Contains(parts[1], ".") && !strings.ContainsAny(email, " \t\r\n")
+	return len(parts[0]) > 0 && strings.Contains(parts[1], ".") && !strings.ContainsAny(email, " 	\r\n")
 }
 
 func (s *Server) sendWelcomeEmail(name, to string) error {
@@ -2875,6 +2904,9 @@ func (s *Server) deleteAIHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, err = tx.Exec(`DELETE FROM ai_messages WHERE user_id=$1`, u.ID); err == nil {
 		_, err = tx.Exec(`DELETE FROM ai_usage WHERE user_id=$1`, u.ID)
+	}
+	if err == nil {
+		_, err = tx.Exec(`DELETE FROM web_screenshots WHERE user_id=$1`, u.ID)
 	}
 	if err == nil {
 		_, err = tx.Exec(`DELETE FROM user_memories WHERE user_id=$1`, u.ID)

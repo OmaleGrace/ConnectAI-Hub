@@ -512,3 +512,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .memory-list { margin: 14px 0; border-top: 1px solid var(--line); }
 .memory-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); margin: 0; }
 .memory-row span { overflow-wrap: anywhere; }
+
+/* ---------- Link reading & screenshots ---------- */
+.shot-link { display: block; margin: 8px 0; }
+.shot { display: block; max-width: 100%; height: auto; border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow-sm, 0 1px 3px rgb(0 0 0 / .08)); }
+.shot-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); cursor: pointer; white-space: nowrap; }
+.shot-toggle input { accent-color: var(--accent); }

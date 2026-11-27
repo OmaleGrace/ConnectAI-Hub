@@ -29,7 +29,7 @@
       <form class="chat-form" id="chatForm" data-module="{{.Module.Slug}}" data-csrf="{{.CSRF}}">
         <label class="sr-only" for="chatInput">Your message</label>
         <textarea id="chatInput" rows="2" maxlength="8000" data-initial-prompt="{{.Name}}" placeholder="Message your {{.Module.Name}} assistant…" required></textarea>
-        <div class="chat-form-bottom"><span>Enter to send · Shift+Enter for a new line. Don’t share passwords or API keys.</span><button class="button" id="sendButton" type="submit">Send message ↗</button></div>
+        <div class="chat-form-bottom"><span>Enter to send · Shift+Enter for a new line. Paste a link and the assistant will read it. Don’t share passwords or API keys.</span><label class="shot-toggle" title="Take a screenshot of any link in your message and let the assistant look at it"><input type="checkbox" id="shotToggle"> 📷 Screenshot links</label><button class="button" id="sendButton" type="submit">Send message ↗</button></div>
       </form>
     </div>
     <aside class="module-aside">

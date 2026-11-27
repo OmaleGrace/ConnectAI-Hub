@@ -8,7 +8,12 @@ COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/connectai-hub .
 
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates tzdata && adduser -D -u 10001 app
+# chromium + fonts power website screenshots (about 300 MB). Remove these packages and the two
+# ENV lines below if you do not want screenshots; link reading keeps working without them.
+RUN apk add --no-cache ca-certificates tzdata chromium font-noto font-noto-emoji font-liberation \
+    && adduser -D -u 10001 app
+ENV CHROME_BIN=/usr/bin/chromium \
+    CHROME_NO_SANDBOX=true
 WORKDIR /app
 # The server reads templates/ and static/ from its working directory.
 COPY --from=build /out/connectai-hub .

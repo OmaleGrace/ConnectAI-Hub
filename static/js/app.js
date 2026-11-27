@@ -6,6 +6,8 @@ function renderMarkdown(source) {
   const inline = (t) => {
     const codes = [];
     t = t.replace(/`([^`\n]+)`/g, (_, c) => { codes.push(c); return "\u0000" + (codes.length - 1) + "\u0000"; });
+    // Screenshots taken by the server: same-origin /screenshots/<id> only, shown as a clickable picture.
+    t = t.replace(/!\[([^\]\n]*)\]\((\/screenshots\/\d+)\)/g, '<a class="shot-link" href="$2" target="_blank" rel="noopener"><img class="shot" loading="lazy" src="$2" alt="$1"></a>');
     t = t.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
          .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
          .replace(/(^|[^*\w])\*([^*\n]+)\*(?!\w)/g, "$1<em>$2</em>");
@@ -299,11 +301,13 @@ document.addEventListener("DOMContentLoaded", () => {
       errorBox.hidden=true;
       const userBubble=addMessage("user",message);
       input.value="";button.disabled=true;button.textContent="Thinking…";
-      const pending=addMessage("model","Generating a response…",true);
+      const hasLink=/(https?:\/\/|\bwww\.)\S+/i.test(message);
+      const shotOn=document.getElementById("shotToggle");
+      const pending=addMessage("model",hasLink?"Opening the link and generating a response…":"Generating a response…",true);
       try{
         const response=await fetch(`/api/modules/${encodeURIComponent(slug)}/chat`,{
           method:"POST",headers:{"Content-Type":"application/json"},
-          body:JSON.stringify({message,csrf_token:csrf})
+          body:JSON.stringify({message,csrf_token:csrf,screenshot:(shotOn&&shotOn.checked)?"on":"auto"})
         });
         const text=await response.text();
         if(!response.ok) throw new Error(text||"The request could not be completed.");

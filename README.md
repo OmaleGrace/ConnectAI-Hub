@@ -30,6 +30,18 @@ For a Play Store listing, wrap the same site with PWABuilder or Bubblewrap (Trus
 
 `static/js/tour.js`: signed-in members get a spotlight tour of the dashboard once per account (replay from **Take a tour** or Settings). Visitors on the home page get a small dismissible invitation, never a blocking pop-up. Edit the `memberSteps` and `visitorSteps` lists to change the content.
 
+## Links and screenshots in the AI assistants
+
+Every assistant can read web pages the user pastes, and can take a screenshot of them.
+
+- **Reading links:** paste up to 3 `https://` (or `www.`) links in a message. The server opens each page, extracts the readable text and gives it to the AI as clearly marked, untrusted reference material. The answer lists the pages it read; if a page cannot be opened the assistant says so instead of guessing.
+- **Screenshots:** tick **📷 Screenshot links** under the message box, or just ask ("what does this site look like?", "screenshot it", "check it on mobile", "full page"). The picture appears in the answer, can be opened or downloaded, and is also shown to the AI so it can review the design. Up to 2 per message, 8 per 10 minutes, newest 60 kept per user, deleted after 30 days.
+- **Not supported:** pages behind a login, PDFs (use the Documents assistant), and keyword web search (only links the user pastes are opened).
+
+**Security.** Opening user-supplied addresses from a server is risky (SSRF), so `netguard.go` only allows public internet addresses on ports 80/443, checks the real IP at connect time (covers DNS tricks and redirects) and refuses localhost, private ranges and the cloud metadata address. Chrome is forced through a local filtering proxy (`egressproxy.go`) that enforces the same rules for every request a page makes, runs with a throw-away profile and none of your secrets, and is killed on timeout. Screenshots are re-encoded as JPEG.
+
+**Setup.** The Docker image installs Chromium and sets `CHROME_BIN` and `CHROME_NO_SANDBOX=true` (Chrome cannot use its own sandbox as a non-root user inside Docker; the proxy and process limits are the protection, so for a public site consider running the app in a container with no access to your private network). Without Chrome, link reading works and screenshots are switched off. `WEB_ACCESS=off` disables both.
+
 ## Configuration
 
 Everything is an environment variable; `.env.example` lists them all with comments. The important ones:
@@ -96,3 +108,10 @@ templates/ static/         pages, CSS, JS, icons, service worker
 ```
 
 See `EFFICIENCY.md` for the performance and quality changes already made.
+
+
+## URL Search & Screenshot
+
+Signed-in users can open `/web-tools` to inspect a public website URL. ConnectAI Hub extracts the page title, description, headings, readable text and outgoing links. Users can also request a desktop/mobile screenshot and download the captured image.
+
+Screenshot capture requires Chrome/Chromium on the server. The included Dockerfile installs Chromium and configures `CHROME_BIN=/usr/bin/chromium` plus `CHROME_NO_SANDBOX=true`. If deploying without the included Dockerfile, install Chromium and set `CHROME_BIN` to its executable path. Set `WEB_ACCESS=off` to disable URL reading and screenshots.
