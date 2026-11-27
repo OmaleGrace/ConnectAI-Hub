@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"sync"
@@ -58,8 +59,10 @@ func (p *egressProxy) handle(c net.Conn) {
 	br := bufio.NewReader(c)
 	req, err := http.ReadRequest(br)
 	if err != nil {
+		log.Printf("connectai: screenshot proxy could not read browser request: %v", err)
 		return
 	}
+	log.Printf("connectai: screenshot proxy received %s request for %s", req.Method, req.Host)
 	if req.Method == http.MethodConnect {
 		p.tunnel(c, br, req)
 		return
@@ -74,9 +77,11 @@ func (p *egressProxy) tunnel(c net.Conn, br *bufio.Reader, req *http.Request) {
 	defer cancel()
 	up, err := safeDialContext(ctx, "tcp", req.Host)
 	if err != nil {
-		_, _ = io.WriteString(c, "HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n")
+		log.Printf("connectai: screenshot proxy CONNECT to %q failed: %v", req.Host, err)
+		_, _ = io.WriteString(c, "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
 		return
 	}
+	log.Printf("connectai: screenshot proxy CONNECT to %q established", req.Host)
 	defer up.Close()
 	_ = up.SetDeadline(time.Now().Add(proxyConnLifetime))
 	if _, err := io.WriteString(c, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
@@ -111,6 +116,7 @@ func (p *egressProxy) forward(c net.Conn, req *http.Request) {
 	defer cancel()
 	resp, err := p.tr.RoundTrip(req.WithContext(ctx))
 	if err != nil {
+		log.Printf("connectai: screenshot proxy HTTP request to %q failed: %v", req.URL.Host, err)
 		_, _ = io.WriteString(c, "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
 		return
 	}

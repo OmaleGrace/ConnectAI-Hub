@@ -160,19 +160,24 @@ func captureScreenshot(ctx context.Context, rawURL string, opt shotOptions) ([]b
 	runCtx, cancel := context.WithTimeout(ctx, screenshotTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(runCtx, bin, chromeArgs(dir, proxyAddr, u.String(), out, opt)...)
+	var chromeStderr bytes.Buffer
+	cmd.Stderr = &chromeStderr
 	// A minimal environment: Chrome must never see the app's secrets.
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + dir, "TMPDIR=" + dir, "LANG=C.UTF-8"}
 	setProcessGroup(cmd)
 	cmd.Cancel = func() error { killProcessTree(cmd); return nil }
 	cmd.WaitDelay = 2 * time.Second
 	runErr := cmd.Run()
+	if diagnostic := strings.TrimSpace(chromeStderr.String()); diagnostic != "" {
+		log.Printf("connectai: Chrome diagnostics: %s", diagnostic)
+	}
 
 	info, statErr := os.Stat(out)
 	if statErr != nil || info.Size() == 0 {
 		if runCtx.Err() != nil {
 			return nil, errors.New("the page took too long to load for a screenshot")
 		}
-		log.Printf("connectai: screenshot failed: %v", runErr)
+		log.Printf("connectai: screenshot failed: run_error=%v output_stat_error=%v", runErr, statErr)
 		return nil, errors.New("the screenshot could not be captured")
 	}
 	if info.Size() > maxScreenshotPNGBytes {
